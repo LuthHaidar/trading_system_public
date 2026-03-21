@@ -1,0 +1,99 @@
+# Strategy configuration used by backtest.py and main.py.
+# Every top-level key below maps to a strategy name in strategies/STRATEGY_REGISTRY.
+# Detailed behavior docs: docs/STRATEGIES.md
+
+momentum:
+  enabled: true
+  lookback: 252                # Trading days in ranking window
+  skip_recent: 21              # Skip most recent days to avoid short-term reversal
+  n_positions: 5               # Keep top N names by momentum
+  rebalance_frequency: 21       # Calendar days between rebalances
+  min_momentum: 0.02           # Require >=2% momentum to reduce noise-driven turnover
+  weight_method: proportional         # equal | proportional
+
+dual_momentum:
+  enabled: true
+  lookback: 126                # Trailing window for momentum ranking
+  n_positions: 3
+  absolute_momentum_threshold: 0.0
+  cash_ticker: SHY             # If no asset passes absolute momentum filter
+
+mean_reversion:
+  enabled: true
+  window: 20                   # Bollinger window length
+  num_std: 2                   # Band width in standard deviations
+  holding_period: 5            # Max calendar days to hold a position
+  exit_zscore: 0               # Exit when z-score mean-reverts to this level or higher
+  max_positions: 5             # Cap on simultaneous holdings
+
+rsi_mean_reversion:
+  enabled: true
+  rsi_period: 14                # RSI calculation period
+  oversold_threshold: 30        # Enter when RSI <= this (oversold)
+  overbought_threshold: 70      # Exit when RSI >= this (overbought)
+  max_positions: 5              # Cap on simultaneous holdings
+
+statistical_arbitrage:
+  enabled: true
+  lookback: 20
+  ranking_window: 5
+  n_positions: 3
+
+factor_model:
+  enabled: true
+  lookback: 126
+  n_positions: 5
+  factor_weights:
+    momentum: 0.5
+    low_vol: 0.3
+    quality_proxy: 0.2
+
+volatility_trading:
+  enabled: true
+  benchmark_ticker: SPY
+  vol_window: 20
+  vol_threshold: 0.20
+  risk_on_tickers: [QQQ, IWM]
+  defensive_tickers: [SPY]
+  use_hmm_regime: false
+
+strategy_orchestration:
+  enabled: true
+  benchmark_ticker: SPY
+  performance_lookback: 20
+  min_weight_threshold: 0.08
+  regime_vol_threshold: 0.25
+  regime_bear_return_threshold: 0.0
+  hmm_n_states: 3
+  hmm_covariance_type: full
+  base_weights:
+    momentum: 0.4
+    factor_model: 0.3
+    statistical_arbitrage: 0.3
+  allowed_conditions:
+    momentum: [bull, neutral]
+    factor_model: [bull, neutral, bear]
+    statistical_arbitrage: [neutral, bear]
+  regime_multipliers:
+    bull:
+      momentum: 1.2
+      factor_model: 1.0
+      statistical_arbitrage: 0.8
+    bear:
+      momentum: 0.7
+      factor_model: 1.1
+      statistical_arbitrage: 1.4
+
+
+# Optional explicit IBKR contract definitions (B8 long-term).
+# When present, main.py injects these into ibkr.contract_overrides for live trading.
+# contracts:
+#   SPY:
+#     symbol: SPY
+#     exchange: SMART
+#     primary_exchange: ARCA
+#     currency: USD
+#   HSBC.L:
+#     symbol: HSBC
+#     exchange: LSE
+#     currency: GBP

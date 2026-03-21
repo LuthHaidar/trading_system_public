@@ -1,0 +1,181 @@
+portfolio:
+  initial_capital: 5000
+  currency: SGD
+
+execution:
+  timing: close
+  rebalance_timeframe: weekly  # daily | weekly | monthly; weekly lowers turnover vs daily
+  hold_weight_epsilon: 0.0001  # Skip rebalance when max |target-current| <= 1bp per position
+  min_rebalance_weight_delta: 0.02  # Skip rebalance when total L1 drift is below this threshold
+  min_trade_value: 200.0  # Minimum per-position trade value (base currency); smaller targets are dropped
+  invested_sleeve_drift_warn: 0.20  # L1 drift on ex-cash sleeve (small-capital tolerant)
+  cash_drift_warn: 0.05  # Absolute drift vs target cash allocation
+  drift_warn_min_capital: 50000  # Suppress drift warnings when equity is below this level
+  target_weight_drift_warn: 0.05  # Backward-compat fallback for invested_sleeve_drift_warn
+  uninvested_cash_tolerance: 0.005  # 50 bps target ceiling for residual cash after sizing
+  min_forward_data_days: 5  # Minimum bars required after trade date before allowing BUY/ENTRY/INCREASE
+  cost_aware_fee_bps: 5.0  # Conservative fee haircut used by cost-aware share solver
+  cost_aware_spread_bps: 5.0  # Conservative spread haircut used by cost-aware share solver
+  
+costs:
+  # IBKR Pro US stocks tiered pricing
+  commission_per_share: 0.0035
+  commission_min: 0.35
+  commission_max_pct: 0.01  # 1% of trade value
+  
+  # Non-US stocks
+  non_us_commission_rate: 0.001  # 0.1%
+  non_us_commission_min: 4.0
+
+  # Composable fee components
+  components:
+    broker:
+      enabled: true
+      us_commission_per_share: 0.0035
+      us_commission_min: 0.35
+      us_commission_max_pct: 0.01
+      non_us_commission_rate: 0.001
+      non_us_commission_min: 4.0
+    regulatory:
+      enabled: true
+      us_sec_rate: 0.000008
+      us_taf_per_share: 0.000145
+      us_taf_min: 0.01
+      us_taf_max: 7.27
+    exchange:
+      enabled: true
+      per_share: 0.0
+      ad_valorem_rate: 0.0
+    market_taxes:
+      enabled: true
+      by_market:
+        L:  # UK stamp duty on buys
+          rate: 0.005
+          side: BUY
+        HK:  # Hong Kong stamp duty (illustrative)
+          rate: 0.001
+          side: BOTH
+  
+  # FX conversion
+  fx_conversion_rate: 0.00002  # 0.002% (2 bps)
+  
+  # Slippage (basis points)
+  slippage_bps:
+    high_liquidity: 2
+    medium_liquidity: 5
+    low_liquidity: 10
+
+
+  # Bid/ask spread simulation (basis points, v1)
+  spread_bps:
+    high_liquidity: 1.0
+    medium_liquidity: 3.0
+    low_liquidity: 8.0
+
+  slippage_model:
+    mode: parameterized  # 'heuristic' (legacy) or 'parameterized'
+    default_bucket: high_liquidity
+    spread_weight: 0.5
+    volatility_weight: 25.0
+    participation_weight: 100.0
+    participation_exponent: 0.6
+    max_participation_rate: 1.0
+    max_slippage_bps: 100.0
+    bucket_base_bps:
+      high_liquidity: 2
+      medium_liquidity: 5
+      low_liquidity: 10
+    bucket_spread_proxy_bps:
+      high_liquidity: 1.0
+      medium_liquidity: 2.5
+      low_liquidity: 5.0
+    bucket_overrides: {}
+
+risk:
+  # Position sizing
+  position_sizing_method: target_vol  # 'equal', 'volatility', 'inverse_volatility', 'kelly', 'target_vol' (legacy alias: 'risk_parity')
+  
+  # Position limits
+  max_position_size: 0.40  # 40% per position
+  min_position_size: 0.01  # 1% minimum
+  
+  # Portfolio constraints
+  max_positions: 10
+  min_cash_reserve: 0.05  # 5% minimum cash
+  
+  # Sector/correlation limits
+  max_sector_exposure: 0.40  # 40% max in any sector
+  max_correlation: 0.90  # Reduce positions if correlation > 90%
+  min_diversification_score: 0.10  # Scale down exposure when correlation diversification is too low
+  diversification_scale_floor: 0.50  # Min exposure scale when diversification floor is breached
+  
+  # Volatility targeting
+  target_volatility: 0.15  # 15% annual target (for target_vol method)
+  volatility_window: 60  # Days for volatility calculation
+  
+  # Kelly criterion
+  kelly_fraction: 0.5  # Half-Kelly for safety
+  kelly_window: 252  # Days for Kelly calculation
+  kelly_max_total_exposure: 0.95  # Cap summed Kelly fractions before constraints
+  capping_warning_every: 50  # Repeat cap warning every N occurrences per ticker
+  
+  # Optimization
+  use_optimizer: true  # Enable portfolio optimization
+  optimizer_method: risk_parity  # 'max_sharpe', 'min_variance', 'risk_parity'
+  optimizer_max_weight: 0.30
+  optimizer_min_weight: 0.0
+  covariance_estimator: ledoit_wolf  # sample | ledoit_wolf | shrinkage
+  covariance_shrinkage: 0.10  # Used by shrinkage fallback/estimator
+  risk_free_rate: 0.02
+  
+data:
+  data_dir: ./data
+  cache_size: 100
+  max_stale_price_days: 5  # Max allowed stale price days before stale policy is triggered
+  strict_stale_price: false  # Legacy compatibility: true maps to on_stale_price=halt
+  freshness_threshold_days: 3  # Trigger forward update when cache tail is older than this
+  on_stale_price: force_close  # force_close | halt
+  fx_cache_staleness_days: 1  # Reuse cached FX CSV if within this many days of backtest end date
+  use_adjusted_close: true  # Use Adj Close as Close when available
+  
+ibkr:
+  strict_universe_validation: true
+  host: 127.0.0.1
+  port: 7497  # Paper trading (7496 for live)
+  client_id: 1
+  timeout: 60
+  # Optional explicit mapping for ambiguous/non-standard contracts.
+  # contract_overrides:
+  #   SPY:
+  #     symbol: SPY
+  #     exchange: SMART
+  #     currency: USD
+  #     primary_exchange: ARCA
+  
+logging:
+  level: INFO
+  file: logs/trading.log
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+
+live_risk:
+  stale_data_seconds: 300
+  max_data_staleness_days: 1
+  max_order_rejects: 3
+  halt_on_optimization_failure: true
+  partial_fill_retries: 1
+  position_stop_loss_pct: 0.10  # Force-exit position at -10% vs average cost
+  position_trailing_stop_pct: 0.12  # Force-exit if retrace 12% from live peak since tracking started
+  clear_kill_switch_on_reset: true
+  max_daily_loss_pct: 0.03
+  trailing_stop_loss_pct: 0.05
+
+operations:
+  backup_dir: backups
+  max_position_drift_pct: 0.02
+
+data_platform:
+  enabled: true
+  sqlite_path: state/trading_audit.db
+  metrics_store:
+    sqlite_path: state/metrics.db
