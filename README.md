@@ -1,6 +1,6 @@
 # Trading System
 
-A Python trading platform for **strategy research (backtesting)** and **IBKR-connected live execution** with configurable risk controls, transaction-cost modeling, and optional SQLite-based audit/metrics persistence.
+A Python trading platform for **strategy research (backtesting)** and **IBKR-connected live execution** with configurable risk controls, transaction-cost modeling, and optional SQLite-based metrics persistence.
 
 ## What this project does
 
@@ -255,28 +255,3 @@ Focused smoke/regression subsets:
 ```bash
 pytest -q tests/test_config_validation.py tests/test_immediate_bugs.py tests/test_ibkr_contracts.py
 ```
-
----
-
-## Common operational notes
-
-- Ensure IBKR TWS/Gateway is running and API access is enabled before live runs.
-- Use separate client IDs when multiple sessions/tools connect to IBKR.
-- Keep `config/config.yaml` and `config/strategies.yaml` version-controlled and reviewed.
-- Keep real account credentials and sensitive environment data outside the repository.
-- Always validate strategy changes in backtest + paper trading before live mode.
-
----
-
-## Troubleshooting
-
-- **`Unknown strategy`**: ensure name exists in strategy registry and is configured in `config/strategies.yaml`.
-- **No market prices / no data**: verify ticker symbols, network access, and CSV availability in `data/`.
-- **No orders generated**: can be valid (no signal change, constrained weights, or rebalance threshold not crossed).
-- **IBKR connection failures**: verify host/port/client_id, TWS/Gateway status, and API permissions.
-
----
-
-## License / usage
-
-No explicit license file is present in this repository. Confirm usage terms with the repository owner before redistribution.
