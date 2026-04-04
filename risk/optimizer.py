@@ -1,3 +1,5 @@
+import logging
+
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -35,6 +37,7 @@ class PortfolioOptimizer:
         self.min_weight = self.config.get('optimizer_min_weight', self.config.get('min_weight', 0.0))
         self.covariance_estimator = str(self.config.get('covariance_estimator', 'ledoit_wolf')).lower()
         self.covariance_shrinkage = float(self.config.get('covariance_shrinkage', 0.10))
+        self.covariance_ew_halflife = int(self.config.get('covariance_ew_halflife', 63))
         self.covariance_jitter = float(self.config.get('covariance_jitter', 1e-8))
         self._warned_infeasible_bounds = set()
         self._warned_fallback_signatures = set()
@@ -78,16 +81,17 @@ class PortfolioOptimizer:
             valid_assets = len(valid_tickers)
             total_signals = len(signals)
             signature = (total_signals, valid_assets, lookback_window)
-            message = (
-                "Optimizer fallback to equal weight: requires >=%d assets with >=%d return observations; "
-                "got signals=%d, valid_assets=%d"
-                % (min_assets_required, lookback_window, total_signals, valid_assets)
-            )
-            if signature not in self._warned_fallback_signatures:
-                self._warned_fallback_signatures.add(signature)
-                self.logger.warning(message)
-            else:
-                self.logger.debug(message)
+            if self.logger.isEnabledFor(logging.DEBUG) or self.logger.isEnabledFor(logging.INFO): # Use lazy formatting for logging calls
+                message = (
+                    "Optimizer fallback to equal weight: requires >=%d assets with >=%d return observations; "
+                    "got signals=%d, valid_assets=%d"
+                    % (min_assets_required, lookback_window, total_signals, valid_assets)
+                )
+                if signature not in self._warned_fallback_signatures:
+                    self._warned_fallback_signatures.add(signature)
+                    self.logger.warning(message)
+                else:
+                    self.logger.debug(message)
             n = len(signals)
             return {ticker: 1.0/n for ticker in signals}
         
@@ -103,7 +107,7 @@ class PortfolioOptimizer:
         elif method == 'risk_parity':
             weights = self._risk_parity_optimize(cov_matrix)
         else:
-            self.logger.warning(f"Unknown method {method}, using equal weight")
+            self.logger.warning("Unknown method %s, using equal weight", method)
             weights = np.ones(len(valid_tickers)) / len(valid_tickers)
         
         # Convert to dict
@@ -125,6 +129,8 @@ class PortfolioOptimizer:
             - sample
             - ledoit_wolf (default; falls back to shrinkage if sklearn unavailable)
             - shrinkage (diagonal shrinkage of sample covariance)
+            - exponential / ew
+            - exponential_shrinkage / ew_shrinkage
         """
         sample_cov = returns_df.cov()
         estimator = self.covariance_estimator
@@ -142,6 +148,10 @@ class PortfolioOptimizer:
             )
         elif estimator in {'shrinkage', 'diagonal_shrinkage'}:
             cov = self._diagonal_shrinkage(sample_cov)
+        elif estimator in {'exponential', 'ew'}:
+            cov = self._estimate_exponential_covariance(returns_df)
+        elif estimator in {'exponential_shrinkage', 'ew_shrinkage'}:
+            cov = self._diagonal_shrinkage(self._estimate_exponential_covariance(returns_df))
         else:
             if estimator not in self._warned_unknown_cov_estimators:
                 self._warned_unknown_cov_estimators.add(estimator)
@@ -157,6 +167,16 @@ class PortfolioOptimizer:
             cov = cov + np.eye(len(cov)) * jitter
 
         return cov * 252
+
+
+    def _estimate_exponential_covariance(self, returns_df: pd.DataFrame) -> pd.DataFrame:
+        """Estimate exponentially weighted covariance (non-annualized)."""
+        halflife = max(int(self.covariance_ew_halflife), 1)
+        alpha = 1.0 - np.exp(-np.log(2.0) / float(halflife))
+        ewm_cov = returns_df.ewm(alpha=alpha, adjust=True).cov()
+        last_ts = returns_df.index[-1]
+        cov = ewm_cov.loc[last_ts]
+        return cov.reindex(index=returns_df.columns, columns=returns_df.columns).astype(float)
 
     def _diagonal_shrinkage(self, sample_cov: pd.DataFrame) -> pd.DataFrame:
         """Shrink sample covariance toward its diagonal for numerical stability."""
@@ -196,8 +216,8 @@ class PortfolioOptimizer:
                 if len(returns) >= window:
                     returns_list.append(returns.tail(window))
                     valid_tickers.append(ticker)
-            except Exception as e:
-                self.logger.warning(f"Could not get returns for {ticker}: {e}")
+            except (KeyError, TypeError, ValueError) as e:
+                self.logger.warning("Could not get returns for %s: %s", ticker, e)
                 continue
         
         if len(returns_list) < 2:
@@ -303,7 +323,10 @@ class PortfolioOptimizer:
         )
         
         if result.success:
-            self.logger.info(f"Max Sharpe optimization successful: Sharpe = {-result.fun:.2f}")
+            self.logger.info(
+                "Max Sharpe optimization successful: Sharpe = %.2f",
+                -result.fun,
+            )
             return result.x
         else:
             self.logger.warning("Optimization failed, using equal weight")
@@ -348,7 +371,10 @@ class PortfolioOptimizer:
         
         if result.success:
             portfolio_vol = np.sqrt(result.fun)
-            self.logger.info(f"Min variance optimization successful: Vol = {portfolio_vol:.2%}")
+            self.logger.info(
+                "Min variance optimization successful: Vol = %.2f%%",
+                portfolio_vol * 100.0,
+            )
             return result.x
         else:
             self.logger.warning("Optimization failed, using equal weight")

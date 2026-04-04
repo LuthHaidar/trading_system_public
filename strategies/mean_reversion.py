@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict
 from strategies.base_strategy import BaseStrategy
+from utils.types import TickerData, WeightMap
+
+_WARMUP_BUFFER = 10
 
 
 class MeanReversionStrategy(BaseStrategy):
@@ -35,10 +38,10 @@ class MeanReversionStrategy(BaseStrategy):
         self.entry_dates = {}
     
     def get_required_history(self) -> int:
-        return self.window + 10
+        return self.window + _WARMUP_BUFFER
     
-    def generate_signals(self, date: pd.Timestamp, data: Dict[str, pd.DataFrame],
-                        current_positions: Dict[str, float]) -> Dict[str, float]:
+    def generate_signals(self, date: pd.Timestamp, data: TickerData,
+                        current_positions: WeightMap) -> WeightMap:
         """Generate mean reversion signals"""
         self._last_signal_meta = {}
         new_positions = {}
@@ -78,7 +81,13 @@ class MeanReversionStrategy(BaseStrategy):
                     )
                     
                     if should_exit:
-                        self.logger.info(f"{date.date()}: Exit {ticker} - zscore={zscore:.2f}, days={days_held}")
+                        self.logger.info(
+                            "%s: Exit %s - zscore=%.2f, days=%d",
+                            date.date(),
+                            ticker,
+                            zscore,
+                            days_held,
+                        )
                         signal_meta[ticker] = {
                             'reason': f"bollinger_exit zscore={zscore:.3f} days_held={days_held}",
                             'signal_strength': float(zscore),
@@ -99,7 +108,14 @@ class MeanReversionStrategy(BaseStrategy):
                 else:
                     # Entry condition: price below lower band (oversold)
                     if current_price < lower_band and len(new_positions) < self.max_positions:
-                        self.logger.info(f"{date.date()}: Enter {ticker} - price={current_price:.2f}, lower_band={lower_band:.2f}, zscore={zscore:.2f}")
+                        self.logger.info(
+                            "%s: Enter %s - price=%.2f, lower_band=%.2f, zscore=%.2f",
+                            date.date(),
+                            ticker,
+                            current_price,
+                            lower_band,
+                            zscore,
+                        )
                         new_positions[ticker] = 1.0  # Will be normalized later
                         self.entry_dates[ticker] = date
                         signal_meta[ticker] = {
@@ -108,8 +124,8 @@ class MeanReversionStrategy(BaseStrategy):
                             'confidence': float(max(0.0, min(1.0, (-zscore) / max(self.num_std, 1e-9)))),
                         }
                         
-            except Exception as e:
-                self.logger.warning(f"Error processing {ticker}: {e}")
+            except (KeyError, IndexError, ValueError) as e:
+                self.logger.warning("Error processing %s: %s", ticker, e)
                 continue
         
         # Equal weight positions
@@ -146,7 +162,7 @@ class RSIMeanReversionStrategy(BaseStrategy):
         self.max_positions = self.get_config_param('max_positions', 5)
     
     def get_required_history(self) -> int:
-        return self.rsi_period + 10
+        return self.rsi_period + _WARMUP_BUFFER
     
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> float:
         """
@@ -183,8 +199,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
         
         return rsi
     
-    def generate_signals(self, date: pd.Timestamp, data: Dict[str, pd.DataFrame],
-                        current_positions: Dict[str, float]) -> Dict[str, float]:
+    def generate_signals(self, date: pd.Timestamp, data: TickerData,
+                        current_positions: WeightMap) -> WeightMap:
         """Generate RSI-based mean reversion signals"""
         self._last_signal_meta = {}
         new_positions = {}
@@ -206,7 +222,12 @@ class RSIMeanReversionStrategy(BaseStrategy):
                 if is_holding:
                     # Exit if overbought
                     if rsi >= self.overbought:
-                        self.logger.info(f"{date.date()}: Exit {ticker} - RSI={rsi:.1f} (overbought)")
+                        self.logger.info(
+                            "%s: Exit %s - RSI=%.1f (overbought)",
+                            date.date(),
+                            ticker,
+                            rsi,
+                        )
                         signal_meta[ticker] = {
                             'reason': f"rsi_exit rsi={rsi:.2f}",
                             'signal_strength': float(rsi),
@@ -223,7 +244,12 @@ class RSIMeanReversionStrategy(BaseStrategy):
                 else:
                     # Enter if oversold
                     if rsi <= self.oversold and len(new_positions) < self.max_positions:
-                        self.logger.info(f"{date.date()}: Enter {ticker} - RSI={rsi:.1f} (oversold)")
+                        self.logger.info(
+                            "%s: Enter %s - RSI=%.1f (oversold)",
+                            date.date(),
+                            ticker,
+                            rsi,
+                        )
                         new_positions[ticker] = 1.0
                         signal_meta[ticker] = {
                             'reason': f"rsi_entry rsi={rsi:.2f}",
@@ -231,8 +257,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
                             'confidence': float(max(0.0, min(1.0, (self.oversold - rsi) / max(self.oversold, 1e-9)))),
                         }
                         
-            except Exception as e:
-                self.logger.warning(f"Error processing {ticker}: {e}")
+            except (KeyError, IndexError, ValueError) as e:
+                self.logger.warning("Error processing %s: %s", ticker, e)
                 continue
         
         # Equal weight

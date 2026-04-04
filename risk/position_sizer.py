@@ -15,7 +15,6 @@ class PositionSizer:
     - Equal weight
     - Volatility-based (inverse volatility)
     - Inverse volatility
-    - Legacy "risk_parity" alias (implemented as inverse volatility)
     - Kelly criterion
     - Target volatility
     """
@@ -26,14 +25,14 @@ class PositionSizer:
         
         Args:
             method: Sizing method
-                ('equal', 'volatility', 'inverse_volatility', 'risk_parity', 'kelly', 'target_vol')
+                ('equal', 'volatility', 'inverse_volatility', 'kelly', 'target_vol')
             config: Configuration parameters
         """
         self.method = method
         self.config = config or {}
         self.logger = get_logger(f"position_sizer.{method}")
         
-        self.logger.info(f"PositionSizer initialized: {method}")
+        self.logger.info("PositionSizer initialized: %s", method)
     
     def size_positions(self, signals: Dict[str, float], 
                       data: Dict[str, pd.DataFrame],
@@ -58,20 +57,13 @@ class PositionSizer:
             return self._volatility_weight(signals, data)
         elif self.method == 'inverse_volatility':
             return self._inverse_volatility_weight(signals, data)
-        elif self.method == 'risk_parity':
-            self.logger.warning(
-                "position_sizing_method='risk_parity' is deprecated for PositionSizer; "
-                "use 'inverse_volatility' instead. "
-                "(True ERC risk parity remains in PortfolioOptimizer.)"
-            )
-            return self._inverse_volatility_weight(signals, data)
         elif self.method == 'kelly':
             return self._kelly_criterion(signals, data)
         elif self.method == 'target_vol':
             # Vol targeting is applied as a final post-constraint transform in engine.
             return self._equal_weight(signals)
         else:
-            self.logger.warning(f"Unknown method {self.method}, using equal weight")
+            self.logger.warning("Unknown method %s, using equal weight", self.method)
             return self._equal_weight(signals)
     
     def _equal_weight(self, signals: Dict[str, float]) -> Dict[str, float]:
@@ -127,8 +119,8 @@ class PositionSizer:
                 
                 volatilities[ticker] = vol
                 
-            except Exception as e:
-                self.logger.warning(f"Could not calculate volatility for {ticker}: {e}")
+            except (KeyError, TypeError, ValueError) as e:
+                self.logger.warning("Could not calculate volatility for %s: %s", ticker, e)
                 continue
         
         if not volatilities:
@@ -141,7 +133,7 @@ class PositionSizer:
         weights = {ticker: inv_vol / total_inv_vol 
                   for ticker, inv_vol in inv_vols.items()}
         
-        self.logger.info(f"Volatility weights: {[f'{t}:{w:.2%}' for t, w in weights.items()]}")
+        self.logger.info("Volatility weights: %s", [f'{t}:{w:.2%}' for t, w in weights.items()])
         return weights
     
     def _inverse_volatility_weight(self, signals: Dict[str, float],
@@ -149,9 +141,8 @@ class PositionSizer:
         """
         Inverse volatility allocation.
 
-        Note: this is kept as the implementation behind the legacy
-        `risk_parity` method name for backward compatibility. True
-        equal-risk-contribution optimization is implemented in
+        Note: this is the position-sizer inverse-volatility heuristic.
+        True equal-risk-contribution optimization is implemented in
         `risk.optimizer.PortfolioOptimizer._risk_parity_optimize`.
         
         Args:
@@ -179,8 +170,8 @@ class PositionSizer:
                 vol = returns.tail(window).std() * np.sqrt(252)
                 volatilities[ticker] = max(vol, 0.01)
                 
-            except Exception as e:
-                self.logger.warning(f"Could not calculate volatility for {ticker}: {e}")
+            except (KeyError, TypeError, ValueError) as e:
+                self.logger.warning("Could not calculate volatility for %s: %s", ticker, e)
                 continue
         
         if not volatilities:
@@ -192,14 +183,10 @@ class PositionSizer:
         
         weights = {ticker: inv_vol / total for ticker, inv_vol in inv_vols.items()}
 
-        self.logger.info(
-            f"Inverse-vol weights (legacy risk_parity): "
-            f"{[f'{t}:{w:.2%}' for t, w in weights.items()]}"
-        )
+        self.logger.info("Inverse-vol weights: %s", [f'{t}:{w:.2%}' for t, w in weights.items()])
         
         return weights
 
-    # Backward-compatible alias for any internal/custom callers.
     def _kelly_criterion(self, signals: Dict[str, float],
                         data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
         """
@@ -216,7 +203,7 @@ class PositionSizer:
             Kelly-sized positions
         """
         window = self.config.get('kelly_window', 252)
-        kelly_fraction = self.config.get('kelly_fraction', 0.5)  # Half-Kelly for safety
+        kelly_fraction = self.config.get('kelly_fraction', 0.5)
         
         kelly_sizes = {}
         
@@ -256,13 +243,19 @@ class PositionSizer:
                 kelly_f = (p * avg_win - (1 - p) * avg_loss) / avg_win
                 
                 # Apply fraction and bounds
-                kelly_f = kelly_f * kelly_fraction
-                kelly_f = max(0, min(kelly_f, 0.5))  # Cap at 50%
-                
+                pre_cap_kelly_f = kelly_f * kelly_fraction
+                self.logger.info(
+                    "Kelly sizing ticker=%s fraction=%.4f pre_cap_weight=%.6f",
+                    ticker,
+                    float(kelly_fraction),
+                    float(pre_cap_kelly_f),
+                )
+                kelly_f = max(0, min(pre_cap_kelly_f, 0.5))  # Cap at 50%
+
                 kelly_sizes[ticker] = kelly_f
                 
-            except Exception as e:
-                self.logger.warning(f"Could not calculate Kelly for {ticker}: {e}")
+            except (KeyError, IndexError, ValueError) as e:
+                self.logger.warning("Could not calculate Kelly for %s: %s", ticker, e)
                 continue
         
         if not kelly_sizes:
@@ -294,8 +287,9 @@ class PositionSizer:
 
         gross_exposure = sum(weights.values())
         self.logger.info(
-            f"Kelly weights (absolute fractions): {[f'{t}:{w:.2%}' for t, w in weights.items()]} "
-            f"| gross_exposure={gross_exposure:.2%}"
+            "Kelly weights (absolute fractions): %s | gross_exposure=%.2f%%",
+            [f'{t}:{w:.2%}' for t, w in weights.items()],
+            gross_exposure * 100.0,
         )
         return weights
     
@@ -326,8 +320,8 @@ class PositionSizer:
                 returns = prices.pct_change().dropna()
                 if len(returns) >= window:
                     returns_data[ticker] = returns.tail(window)
-            except Exception as exc:
-                self.logger.debug(f"Could not include {ticker} in final target-vol calc: {exc}")
+            except (KeyError, TypeError, ValueError) as exc:
+                self.logger.debug("Could not include %s in final target-vol calc: %s", ticker, exc)
 
         if len(returns_data) < 2:
             return weights
@@ -380,11 +374,10 @@ class RiskConstraints:
         self.config = config
         self.logger = get_logger("risk_constraints")
         
-        # Load constraints
-        self.max_position_size = config.get('max_position_size', 0.20)
+        # Load constraints from config
+        self.max_position_size = config.get('max_position_size', 0.10)
         self.max_positions = config.get('max_positions')
         self.min_position_size = config.get('min_position_size', 0.01)
-        self.max_sector_exposure = config.get('max_sector_exposure', 0.40)
         self.max_correlation = config.get('max_correlation', 0.90)
         self.min_diversification_score = config.get('min_diversification_score')
         self.diversification_scale_floor = float(config.get('diversification_scale_floor', 0.5))
@@ -394,20 +387,20 @@ class RiskConstraints:
         
         max_positions_text = self.max_positions if self.max_positions is not None else "none"
         self.logger.info(
-            f"Risk constraints: max_pos={self.max_position_size:.1%}, "
-            f"max_positions={max_positions_text}, min_cash={self.min_cash_reserve:.1%}"
+            "Risk constraints: max_pos=%.1f%%, max_positions=%s, min_cash=%.1f%%",
+            self.max_position_size * 100.0,
+            max_positions_text,
+            self.min_cash_reserve * 100.0,
         )
     
     def apply_constraints(self, weights: Dict[str, float],
-                         data: Dict[str, pd.DataFrame] = None,
-                         sector_map: Dict[str, str] = None) -> Dict[str, float]:
+                         data: Dict[str, pd.DataFrame] = None) -> Dict[str, float]:
         """
         Apply all risk constraints to weights
         
         Args:
             weights: Target weights
             data: Historical data (for correlation checks)
-            sector_map: Dict of {ticker: sector}
             
         Returns:
             Constrained weights
@@ -420,10 +413,6 @@ class RiskConstraints:
 
         # Apply portfolio-level max position count
         constrained = self._apply_max_positions_limit(constrained)
-        
-        # Apply sector limits if provided
-        if sector_map:
-            constrained = self._apply_sector_limits(constrained, sector_map)
         
         # Apply correlation limits if data provided
         if data:
@@ -445,7 +434,12 @@ class RiskConstraints:
         for ticker, weight in weights.items():
             # Remove positions below minimum
             if weight < self.min_position_size:
-                self.logger.debug(f"Removing {ticker}: {weight:.2%} < min {self.min_position_size:.2%}")
+                self.logger.debug(
+                    "Removing %s: %.2f%% < min %.2f%%",
+                    ticker,
+                    weight * 100.0,
+                    self.min_position_size * 100.0,
+                )
                 continue
             
             # Cap positions above maximum
@@ -459,11 +453,19 @@ class RiskConstraints:
 
                 if should_warn:
                     self.logger.warning(
-                        f"Capping {ticker}: {weight:.2%} -> {self.max_position_size:.2%} "
-                        f"(occurrence #{count})"
+                        "Capping %s: %.2f%% -> %.2f%% (occurrence #%d)",
+                        ticker,
+                        weight * 100.0,
+                        self.max_position_size * 100.0,
+                        count,
                     )
                 else:
-                    self.logger.debug(f"Capping {ticker}: {weight:.2%} -> {self.max_position_size:.2%}")
+                    self.logger.debug(
+                        "Capping %s: %.2f%% -> %.2f%%",
+                        ticker,
+                        weight * 100.0,
+                        self.max_position_size * 100.0,
+                    )
                 constrained[ticker] = self.max_position_size
             else:
                 constrained[ticker] = weight
@@ -494,37 +496,7 @@ class RiskConstraints:
         if total > 0:
             trimmed = {ticker: weight / total for ticker, weight in trimmed.items()}
         return trimmed
-    
-    def _apply_sector_limits(self, weights: Dict[str, float],
-                            sector_map: Dict[str, str]) -> Dict[str, float]:
-        """Apply sector exposure limits"""
-        # Calculate sector exposures
-        sector_exposure = {}
-        for ticker, weight in weights.items():
-            sector = sector_map.get(ticker, 'Unknown')
-            sector_exposure[sector] = sector_exposure.get(sector, 0) + weight
-        
-        # Check for violations
-        violations = {sector: exp for sector, exp in sector_exposure.items() 
-                     if exp > self.max_sector_exposure}
-        
-        if not violations:
-            return weights
-        
-        # Scale down overweight sectors
-        constrained = {}
-        for ticker, weight in weights.items():
-            sector = sector_map.get(ticker, 'Unknown')
-            
-            if sector in violations:
-                scale = self.max_sector_exposure / violations[sector]
-                new_weight = weight * scale
-                self.logger.warning(f"Scaling {ticker} in {sector}: {weight:.2%} -> {new_weight:.2%}")
-                constrained[ticker] = new_weight
-            else:
-                constrained[ticker] = weight
-        
-        return constrained
+
     
     def _apply_correlation_limits(self, weights: Dict[str, float],
                                   data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
@@ -552,8 +524,8 @@ class RiskConstraints:
                 if len(returns) >= window:
                     returns_list.append(returns.tail(window))
                     valid_tickers.append(ticker)
-            except Exception as exc:
-                self.logger.warning(f"Correlation check skipped for {ticker}: {exc}")
+            except (KeyError, TypeError, ValueError) as exc:
+                self.logger.warning("Correlation check skipped for %s: %s", ticker, exc)
                 continue
         
         if len(returns_list) < 2:
@@ -583,12 +555,24 @@ class RiskConstraints:
                     
                     if w1 < w2:
                         constrained[ticker1] = w1 * scale
-                        self.logger.warning(f"High correlation {ticker1}-{ticker2} "
-                                          f"({corr:.2f}): reducing {ticker1} by {1.0-scale:.1%}")
+                        self.logger.warning(
+                            "High correlation %s-%s (%.2f): reducing %s by %.1f%%",
+                            ticker1,
+                            ticker2,
+                            corr,
+                            ticker1,
+                            (1.0 - scale) * 100.0,
+                        )
                     else:
                         constrained[ticker2] = w2 * scale
-                        self.logger.warning(f"High correlation {ticker1}-{ticker2} "
-                                          f"({corr:.2f}): reducing {ticker2} by {1.0-scale:.1%}")
+                        self.logger.warning(
+                            "High correlation %s-%s (%.2f): reducing %s by %.1f%%",
+                            ticker1,
+                            ticker2,
+                            corr,
+                            ticker2,
+                            (1.0 - scale) * 100.0,
+                        )
         
         return constrained
 
@@ -628,8 +612,8 @@ class RiskConstraints:
                 r = data[ticker]['Close'].pct_change().dropna()
                 if len(r) >= window:
                     returns[ticker] = r.tail(window)
-            except Exception as exc:
-                self.logger.debug(f"Skipping {ticker} in diversification score: {exc}")
+            except (KeyError, TypeError, ValueError) as exc:
+                self.logger.debug("Skipping %s in diversification score: %s", ticker, exc)
 
         if len(returns) < 2:
             return weights
@@ -666,7 +650,10 @@ class RiskConstraints:
         scale = max_invested / total_weight
         constrained = {ticker: weight * scale for ticker, weight in weights.items()}
         
-        self.logger.info(f"Scaled positions by {scale:.2f}x to maintain "
-                        f"{self.min_cash_reserve:.1%} cash reserve")
+        self.logger.info(
+            "Scaled positions by %.2fx to maintain %.1f%% cash reserve",
+            scale,
+            self.min_cash_reserve * 100.0,
+        )
         
         return constrained

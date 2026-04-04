@@ -1,6 +1,6 @@
 # Trading System
 
-A Python trading platform for **strategy research (backtesting)** and **IBKR-connected live execution** with configurable risk controls, transaction-cost modeling, and optional SQLite-based metrics persistence.
+A Python trading platform for **strategy research (backtesting)** and **IBKR-connected live execution** with configurable risk controls, transaction-cost modeling, and optional SQLite-based audit/metrics persistence.
 
 ## What this project does
 
@@ -86,10 +86,12 @@ Useful options:
 - `--no-plot`
 - `--no-save`
 - `--mc-seed 42` (set deterministic Monte Carlo bootstrap seed)
+- `--mc-mode trade_shuffle|trade_resample|return_block` (select MC simulation path)
 - `--no-mc-plot` (skip Monte Carlo projection plot generation)
 - `--walk-forward` (run fixed-config walk-forward analysis)
 - `--wf-train-days 252 --wf-oos-days 63 --wf-step-days 63`
 - `--wf-anchored` (anchored expanding train windows for walk-forward)
+- `--wf-sweep lookback=63,126,252` (per-fold train-only parameter search for walk-forward)
 - `--strategies-config config/strategies.yaml`
 - `--strategy-override '{"lookback": 126}'`
 - `--config-override '{"risk": {"max_position_size": 0.15}}'`
@@ -115,6 +117,8 @@ Sweep runs print a ranked leaderboard and save `results/tuning_results.csv` with
 
 You can also use automatic numeric ranges in `--sweep` values via `start:end[:step]` syntax.
 For example, `--sweep lookback=63:252:63` expands to `63,126,189,252`.
+
+> Note: `--sweep` and `--wf-sweep` are mutually exclusive.
 
 Artifacts produced (when saving is enabled):
 
@@ -206,8 +210,8 @@ To switch strategy:
 
 ### Risk controls
 
-- Position sizing methods: `equal`, `volatility`, `inverse_volatility`, `kelly`, `target_vol` (legacy alias: `risk_parity`).
-- Constraints include max/min position sizing, max positions, reserve cash, sector/correlation limits.
+- Position sizing methods: `equal`, `volatility`, `inverse_volatility`, `kelly`, `target_vol`.
+- Constraints include max/min position sizing, max positions, reserve cash, correlation limits.
 - Live risk manager supports stale-data checks, order-reject thresholds, daily loss limits, and trailing stop-loss behavior.
 
 ### Transaction cost model
@@ -241,17 +245,3 @@ Default DB paths:
 - `state/metrics.db`
 
 ---
-
-## Testing and diagnostics
-
-Run the pytest suite:
-
-```bash
-pytest -q
-```
-
-Focused smoke/regression subsets:
-
-```bash
-pytest -q tests/test_config_validation.py tests/test_immediate_bugs.py tests/test_ibkr_contracts.py
-```

@@ -972,12 +972,6 @@ class PerformanceMetrics:
         print(f"  {'Total FX Cost:':<28} {metrics.get('total_fx_cost', 0):>12.2f}")
         print(f"  {'Total Costs:':<28} {metrics.get('total_cost', 0):>12.2f}")
         print(f"  {'Costs (% of initial equity):':<28} {metrics.get('cost_pct', 0):>11.2%}")
-        fill_rate = metrics.get('fill_rate')
-        if fill_rate is None:
-            print(f"  {'Fill Rate:':<28} {'N/A (simulation)':>12}")
-        else:
-            print(f"  {'Fill Rate:':<28} {fill_rate:>11.2%}")
-
         trade_count_by_ticker = metrics.get('trade_count_by_ticker', {}) or {}
         pnl_contribution_by_ticker = metrics.get('pnl_contribution_by_ticker', {}) or {}
         win_rate_by_ticker = metrics.get('win_rate_by_ticker', {}) or {}
@@ -1121,8 +1115,6 @@ class PerformanceMetrics:
             'avg_realized_slippage_bps': 0.0,
             'implementation_shortfall': 0.0,
             'implementation_shortfall_bps': 0.0,
-            'fill_rate': None,
-            'avg_fill_size': 0.0,
             'best_execution_score': 1.0,
             'order_type_breakdown': {},
         }

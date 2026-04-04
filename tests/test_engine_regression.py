@@ -11,7 +11,7 @@ class AlwaysLongStrategy:
     name = 'AlwaysLong'
 
     def get_required_history(self):
-        return 1
+        return 0
 
     def generate_signals(self, date, data, current_positions):
         return {'AAA': 1.0}
@@ -24,7 +24,7 @@ class HoldCurrentWeightsStrategy:
     name = 'HoldCurrent'
 
     def get_required_history(self):
-        return 1
+        return 0
 
     def generate_signals(self, date, data, current_positions):
         return dict(current_positions or {})
@@ -34,7 +34,7 @@ class EqualTwoAssetStrategy:
     name = 'EqualTwo'
 
     def get_required_history(self):
-        return 1
+        return 0
 
     def generate_signals(self, date, data, current_positions):
         return {'AAA': 1.0, 'BBB': 1.0}
@@ -45,7 +45,7 @@ class TwoStepDriftStrategy:
     name = 'TwoStepDrift'
 
     def get_required_history(self):
-        return 1
+        return 0
 
     def generate_signals(self, date, data, current_positions):
         if pd.Timestamp(date) <= pd.Timestamp('2024-01-02'):
@@ -59,10 +59,22 @@ class TinyTailWeightStrategy:
     name = 'TinyTail'
 
     def get_required_history(self):
-        return 1
+        return 0
 
     def generate_signals(self, date, data, current_positions):
         return {'AAA': 0.90, 'BBB': 0.09, 'CCC': 0.01}
+
+
+
+class WarmupStrategy:
+    name = 'Warmup'
+
+    def get_required_history(self):
+        return 2
+
+    def generate_signals(self, date, data, current_positions):
+        return {'AAA': 1.0}
+
 
 class MetadataLongStrategy:
     name = 'MetadataLong'
@@ -71,7 +83,7 @@ class MetadataLongStrategy:
         self._last_meta = {}
 
     def get_required_history(self):
-        return 1
+        return 0
 
     def generate_signals(self, date, data, current_positions):
         self._last_meta = {
@@ -87,12 +99,42 @@ class MetadataLongStrategy:
         return dict(self._last_meta)
 
 
+class AttributionStubStrategy:
+    name = 'strategy_orchestration'
+
+    def __init__(self):
+        self._history = []
+
+    def get_required_history(self):
+        return 0
+
+    def generate_signals(self, date, data, current_positions):
+        self._history.append(
+            {
+                'date': pd.Timestamp(date),
+                'strategy_allocations': {'sub_a': {'AAA': 0.6}, 'sub_b': {'AAA': 0.4}},
+            }
+        )
+        return {'AAA': 1.0}
+
+    def get_attribution_history(self):
+        return list(self._history)
+
+
 class FakeDataManager:
     def __init__(self, frame):
         self.frame = frame
 
     def load_ticker(self, ticker, start_date=None, end_date=None):
         return self.frame.copy()
+
+
+class MultiFrameDataManager:
+    def __init__(self, frames):
+        self.frames = frames
+
+    def load_ticker(self, ticker, start_date=None, end_date=None):
+        return self.frames[ticker].copy()
 
 
 class BacktestEngineRegressionTests(unittest.TestCase):
@@ -577,7 +619,7 @@ class BacktestEngineRegressionTests(unittest.TestCase):
         self.assertEqual(len(results['trades']), 2)
 
 
-    def test_fill_rate_is_none_in_backtest_metrics(self):
+    def test_fill_rate_fields_absent_in_backtest_metrics(self):
         frame = pd.DataFrame(
             {
                 'Open': [100.0, 100.0],
@@ -596,8 +638,62 @@ class BacktestEngineRegressionTests(unittest.TestCase):
 
         results = engine.run(['AAA'], '2024-01-02', '2024-01-03')
 
-        self.assertIsNone(results['metrics'].get('fill_rate'))
-        self.assertEqual(results['metrics'].get('fill_rate_reason'), 'simulation')
+        self.assertNotIn('fill_rate', results['metrics'])
+        self.assertNotIn('avg_fill_size', results['metrics'])
+    def test_required_history_aligns_effective_start_for_equity_and_benchmark(self):
+        dates = pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04', '2024-01-05', '2024-01-08'])
+        frame = pd.DataFrame(
+            {
+                'Open': [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                'High': [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                'Low': [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                'Close': [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                'Volume': [1_000_000] * 6,
+            },
+            index=dates,
+        )
+
+        engine = BacktestEngine(
+            strategy=WarmupStrategy(),
+            data_manager=FakeDataManager(frame),
+            config=self._base_config(),
+        )
+
+        results = engine.run(['AAA'], '2024-01-02', '2024-01-08')
+        self.assertEqual(results['effective_start_date'], '2024-01-04')
+        self.assertEqual(results['required_history_days'], 2)
+        self.assertEqual(results['warmup_history_shortfall_days'], 0)
+        self.assertEqual(pd.Timestamp(results['equity_curve'].index[0]), pd.Timestamp('2024-01-04'))
+
+        benchmark_equity = results['benchmark_analysis'].get('equity_curve')
+        self.assertIsNotNone(benchmark_equity)
+        self.assertEqual(pd.Timestamp(benchmark_equity.index[0]), pd.Timestamp('2024-01-04'))
+
+    def test_asset_exclusions_capture_insufficient_history(self):
+        dates = pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04'])
+        long_frame = pd.DataFrame(
+            {
+                'Open': [100.0, 101.0, 102.0, 103.0],
+                'High': [100.0, 101.0, 102.0, 103.0],
+                'Low': [100.0, 101.0, 102.0, 103.0],
+                'Close': [100.0, 101.0, 102.0, 103.0],
+                'Volume': [1_000_000] * 4,
+            },
+            index=dates,
+        )
+        short_frame = long_frame.iloc[2:].copy()
+
+        engine = BacktestEngine(
+            strategy=WarmupStrategy(),
+            data_manager=MultiFrameDataManager({'AAA': long_frame, 'BBB': short_frame}),
+            config=self._base_config(),
+        )
+
+        results = engine.run(['AAA', 'BBB'], '2024-01-01', '2024-01-04')
+        exclusions = results.get('asset_exclusions', [])
+        self.assertTrue(exclusions)
+        self.assertTrue(any(ex.ticker == 'BBB' and ex.reason == 'insufficient_history' for ex in exclusions))
+
 
     def test_metrics_store_writes_all_numeric_scalar_metrics(self):
         class MemoryMetricsStore:
@@ -654,6 +750,98 @@ class BacktestEngineRegressionTests(unittest.TestCase):
             self.assertTrue(metric_name.endswith(run_id))
             self.assertEqual(tags.get('run_id'), run_id)
             self.assertEqual(tags.get('strategy'), engine.strategy.name)
+
+    def test_results_include_pit_and_retrospective_regime_outputs(self):
+        dates = pd.date_range('2024-01-02', periods=180, freq='B')
+        close = pd.Series(range(180), index=dates, dtype=float) + 100.0
+        frame = pd.DataFrame(
+            {
+                'Open': close.values,
+                'High': close.values,
+                'Low': close.values,
+                'Close': close.values,
+                'Volume': [1_000_000] * len(dates),
+            },
+            index=dates,
+        )
+        engine = BacktestEngine(
+            strategy=AlwaysLongStrategy(),
+            data_manager=FakeDataManager(frame),
+            config=self._base_config(),
+        )
+
+        results = engine.run(['AAA'], '2024-01-02', '2024-09-30')
+
+        self.assertIn('regime_series', results)
+        self.assertIn('regime_series_pit', results)
+        self.assertIsInstance(results['regime_series_pit'], pd.Series)
+        self.assertIn('regime_performance', results['metrics'])
+        self.assertIn('regime_performance_retrospective', results['metrics'])
+
+    def test_per_ticker_regime_series_present_when_enabled(self):
+        dates = pd.date_range('2024-01-02', periods=180, freq='B')
+        rng = np.random.default_rng(123)
+        rets_a = rng.normal(0.0008, 0.01, len(dates))
+        rets_b = rng.normal(0.0006, 0.012, len(dates))
+        close_a = pd.Series(100.0 * np.cumprod(1.0 + rets_a), index=dates, dtype=float)
+        close_b = pd.Series(90.0 * np.cumprod(1.0 + rets_b), index=dates, dtype=float)
+        frame_a = pd.DataFrame(
+            {
+                'Open': close_a.values,
+                'High': close_a.values,
+                'Low': close_a.values,
+                'Close': close_a.values,
+                'Volume': [1_000_000] * len(dates),
+            },
+            index=dates,
+        )
+        frame_b = pd.DataFrame(
+            {
+                'Open': close_b.values,
+                'High': close_b.values,
+                'Low': close_b.values,
+                'Close': close_b.values,
+                'Volume': [1_000_000] * len(dates),
+            },
+            index=dates,
+        )
+        config = self._base_config()
+        config['risk']['per_ticker_regime'] = True
+        engine = BacktestEngine(
+            strategy=AlwaysLongStrategy(),
+            data_manager=MultiFrameDataManager({'AAA': frame_a, 'BBB': frame_b}),
+            config=config,
+        )
+        results = engine.run(['AAA', 'BBB'], '2024-01-02', '2024-09-30')
+
+        self.assertIn('per_ticker_regime_series', results)
+        regime_map = results['per_ticker_regime_series']
+        self.assertIn('AAA', regime_map)
+        self.assertIsInstance(regime_map['AAA'], pd.Series)
+
+    def test_strategy_attribution_block_present_for_orchestration_like_strategy(self):
+        dates = pd.date_range('2024-01-02', periods=80, freq='B')
+        close = pd.Series(100.0 * np.cumprod(1.0 + np.random.default_rng(55).normal(0.001, 0.01, len(dates))), index=dates)
+        frame = pd.DataFrame(
+            {
+                'Open': close.values,
+                'High': close.values,
+                'Low': close.values,
+                'Close': close.values,
+                'Volume': [1_000_000] * len(dates),
+            },
+            index=dates,
+        )
+        engine = BacktestEngine(
+            strategy=AttributionStubStrategy(),
+            data_manager=FakeDataManager(frame),
+            config=self._base_config(),
+        )
+        results = engine.run(['AAA'], '2024-01-02', '2024-04-30')
+
+        self.assertIn('attribution', results)
+        self.assertIn('sub_a', results['attribution'])
+        self.assertIn('weight_fraction', results['attribution']['sub_a'])
 
 
 if __name__ == '__main__':

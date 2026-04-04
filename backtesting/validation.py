@@ -243,6 +243,74 @@ class ValidationSuite:
         }
 
     @staticmethod
+    def _extract_trade_returns(trades) -> np.ndarray:
+        values = []
+        for trade in trades or []:
+            if isinstance(trade, dict):
+                if 'pnl' in trade:
+                    values.append(float(trade['pnl']))
+                elif 'return' in trade:
+                    values.append(float(trade['return']))
+            else:
+                pnl = getattr(trade, 'pnl', None)
+                ret = getattr(trade, 'return_', None)
+                if pnl is not None:
+                    values.append(float(pnl))
+                elif ret is not None:
+                    values.append(float(ret))
+        return np.asarray(values, dtype=float)
+
+    @staticmethod
+    def monte_carlo_trade_simulation(
+        trades,
+        n_sims: int = 200,
+        mode: str = 'shuffle',
+        ruin_threshold: float = 0.5,
+        random_state: int = 42,
+        return_paths: bool = False,
+    ) -> Dict[str, float]:
+        trade_returns = ValidationSuite._extract_trade_returns(trades)
+        if trade_returns.size == 0:
+            result = {'p05_return': 0.0, 'p50_return': 0.0, 'p95_return': 0.0, 'trade_count': 0}
+            if return_paths:
+                result['paths'] = np.empty((0, 0), dtype=np.float32)
+            return result
+
+        rng = np.random.default_rng(random_state)
+        n = int(trade_returns.size)
+        terminal = np.zeros(n_sims, dtype=float)
+        paths = np.ones((n_sims, n + 1), dtype=np.float64) if return_paths else None
+        clipped = np.clip(trade_returns, -0.99, None)
+
+        for i in range(n_sims):
+            if mode == 'resample':
+                scenario = rng.choice(clipped, size=n, replace=True)
+            else:
+                scenario = rng.permutation(clipped)
+            path = np.cumprod(1.0 + scenario)
+            terminal[i] = float(path[-1] - 1.0)
+            if return_paths:
+                paths[i, 1:] = path
+
+        result = {
+            'p05_return': float(np.percentile(terminal, 5)),
+            'p50_return': float(np.percentile(terminal, 50)),
+            'p95_return': float(np.percentile(terminal, 95)),
+            'trade_count': n,
+        }
+        if return_paths:
+            result['paths'] = paths.astype(np.float32)
+            result['path_stats'] = ValidationSuite.monte_carlo_trade_path_stats(
+                result['paths'],
+                ruin_threshold=ruin_threshold,
+            )
+        return result
+
+    @staticmethod
+    def monte_carlo_trade_path_stats(paths: np.ndarray, ruin_threshold: float = 0.5) -> Dict[str, float]:
+        return ValidationSuite.monte_carlo_path_stats(paths=paths, ruin_threshold=ruin_threshold)
+
+    @staticmethod
     def sensitivity_analysis(base_params: Dict,
                              perturbations: Dict[str, Sequence],
                              evaluator: Callable[[Dict], float]) -> pd.DataFrame:

@@ -40,7 +40,6 @@ class ExecutionConfig(BaseModel):
     min_rebalance_weight_delta: float = 0.02
     min_trade_value: float = 200.0
     invested_sleeve_drift_warn: float = 0.05
-    target_weight_drift_warn: float = 0.05
     cash_drift_warn: float = 0.01
     drift_warn_min_capital: float = 0.0
     uninvested_cash_tolerance: float = 0.005
@@ -57,13 +56,12 @@ class RiskConfig(BaseModel):
     min_position_size: float
     max_positions: int = 10
     min_cash_reserve: float = 0.05
-    max_sector_exposure: float = 1.0
     max_correlation: float = 1.0
     min_diversification_score: float = 0.0
     diversification_scale_floor: float = 0.0
     target_volatility: float = 0.15
     volatility_window: int = 60
-    kelly_fraction: float = 0.5
+    kelly_fraction: float = Field(default=0.25, gt=0.0, le=1.0)
     kelly_window: int = 252
     kelly_max_total_exposure: float = 0.95
     capping_warning_every: int = 50
@@ -73,6 +71,8 @@ class RiskConfig(BaseModel):
     optimizer_min_weight: float = 0.0
     covariance_estimator: str = 'ledoit_wolf'
     covariance_shrinkage: float = 0.1
+    covariance_ew_halflife: int = 63
+    per_ticker_regime: bool = False
     risk_free_rate: float = 0.0
 
 
@@ -82,9 +82,7 @@ class DataConfig(BaseModel):
     data_dir: str
     cache_size: int = 100
     max_stale_price_days: int = 5
-    strict_stale_price: bool = False
     freshness_threshold_days: int = 3
-    on_stale_price: str = 'force_close'
     fx_cache_staleness_days: int = 1
     use_adjusted_close: bool = True
 
@@ -137,8 +135,6 @@ def validate_main_config(config: Dict[str, Any]) -> MainConfig:
     parsed = _validate_model(MainConfig, config)
     if parsed.execution.min_forward_data_days > 0 and parsed.execution.min_forward_data_days < parsed.data.max_stale_price_days:
         raise ValueError('execution.min_forward_data_days must be >= data.max_stale_price_days when enabled (>0)')
-    if parsed.data.on_stale_price not in {'force_close', 'halt'}:
-        raise ValueError('data.on_stale_price must be one of: force_close, halt')
     return parsed
 
 

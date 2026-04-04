@@ -94,3 +94,39 @@ def test_hmm_orchestration_short_series_logs_fallback_warning():
     finally:
         ar.AdvancedRiskAnalytics.hmm_regime_scaler = original_hmm
         ar.AdvancedRiskAnalytics.regime_based_scaler = original_heuristic
+
+
+def test_regime_based_scaler_never_returns_high_vol_label():
+    import risk.advanced_risk as ar
+
+    low_vol = pd.Series(np.full(80, 0.0005))
+    high_vol = pd.Series(np.concatenate([np.zeros(60), np.array([0.2, -0.2] * 10)]))
+
+    out_low = ar.AdvancedRiskAnalytics.regime_based_scaler(low_vol)
+    out_high = ar.AdvancedRiskAnalytics.regime_based_scaler(high_vol, vol_threshold=0.01)
+
+    assert out_low['regime'] in {'bull', 'neutral', 'bear'}
+    assert out_high['regime'] in {'bull', 'neutral', 'bear'}
+    assert out_high['regime'] != 'high_vol'
+
+
+def test_orchestration_asserts_on_unrecognized_regime_label():
+    strategy = _build_orchestration_strategy()
+    strategy.regime_detector = None
+
+    idx = pd.date_range('2024-01-01', periods=30, freq='B')
+    close = np.linspace(100.0, 101.0, len(idx))
+    data = {'SPY': pd.DataFrame({'Close': close}, index=idx)}
+
+    import risk.advanced_risk as ar
+    original_heuristic = ar.AdvancedRiskAnalytics.regime_based_scaler
+    try:
+        ar.AdvancedRiskAnalytics.regime_based_scaler = staticmethod(
+            lambda returns, vol_threshold=0.25, bear_return_threshold=0.0: {'regime': 'unexpected', 'scale': 1.0}
+        )
+        from unittest import TestCase
+        tc = TestCase()
+        with tc.assertRaisesRegex(AssertionError, "Unrecognized regime label"):
+            strategy._detect_market_condition(idx[-1], data)
+    finally:
+        ar.AdvancedRiskAnalytics.regime_based_scaler = original_heuristic

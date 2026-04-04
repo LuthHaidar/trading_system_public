@@ -1,10 +1,12 @@
 import os
 import pandas as pd
+import numpy as np
 from typing import Any, Dict, List, Optional
 from numbers import Real
 from datetime import datetime
 from datetime import timedelta
 from uuid import uuid4
+from dataclasses import dataclass
 import yaml
 from pydantic import ValidationError
 
@@ -32,6 +34,15 @@ from utils.config_schema import validate_main_config, validate_strategies_config
 logger = get_logger(__name__)
 
 
+@dataclass
+class AssetExclusionRecord:
+    ticker: str
+    date: pd.Timestamp
+    reason: str
+    available_bars: int
+    required_bars: int
+    detail: str
+
 
 class BacktestEngine:
     """
@@ -40,7 +51,13 @@ class BacktestEngine:
     
     def __init__(self, strategy: BaseStrategy, data_manager: DataManager, config: Dict):
         """
-        Initialize backtest engine
+        Initialize backtest engine.
+
+        Contract:
+            `config` must be a fully materialized and validated dictionary.
+            Callers are responsible for all file loading, YAML parsing, and
+            override merging before constructing `BacktestEngine`.
+            This constructor performs no configuration I/O or merge logic.
         
         Args:
             strategy: Trading strategy instance
@@ -58,12 +75,7 @@ class BacktestEngine:
         self.hold_weight_epsilon = float(execution_cfg.get('hold_weight_epsilon', 1e-4))
         self.min_rebalance_weight_delta = float(execution_cfg.get('min_rebalance_weight_delta', 0.02))
         self.min_trade_value = float(execution_cfg.get('min_trade_value', 200.0))
-        self.invested_sleeve_drift_warn = float(
-            execution_cfg.get(
-                'invested_sleeve_drift_warn',
-                execution_cfg.get('target_weight_drift_warn', 0.05),
-            )
-        )
+        self.invested_sleeve_drift_warn = float(execution_cfg.get('invested_sleeve_drift_warn', 0.05))
         self.cash_drift_warn = float(execution_cfg.get('cash_drift_warn', 0.01))
         self.drift_warn_min_capital = float(execution_cfg.get('drift_warn_min_capital', 0.0))
         self._consecutive_drift_warnings = 0
@@ -85,8 +97,6 @@ class BacktestEngine:
             initial_capital=self.config['portfolio']['initial_capital'],
             base_currency=self.config['portfolio']['currency'],
             max_stale_price_days=max_stale_days,
-            strict_stale_price=bool(data_cfg.get('strict_stale_price', False)),
-            on_stale_price=data_cfg.get('on_stale_price'),
         )
         
         self.execution_engine = ExecutionEngine(
@@ -128,19 +138,22 @@ class BacktestEngine:
         if self.use_optimizer:
             self.optimizer = PortfolioOptimizer(risk_config)
             optimizer_method = risk_config.get('optimizer_method', 'max_sharpe')
-            logger.info(f"Portfolio optimization enabled: {optimizer_method}")
+            logger.info("Portfolio optimization enabled: %s", optimizer_method)
         else:
             self.optimizer = None
 
-        logger.info(f"BacktestEngine initialized with strategy: {strategy.name}")
-        logger.info(f"Position sizing: {sizing_method}")
+        logger.info("BacktestEngine initialized with strategy: %s", strategy.name)
+        logger.info("Position sizing: %s", sizing_method)
         logger.info(
-            f"Risk constraints: max_pos={self.risk_constraints.max_position_size:.1%}, "
-            f"min_cash={self.risk_constraints.min_cash_reserve:.1%}"
+            "Risk constraints: max_pos=%.1f%%, min_cash=%.1f%%",
+            self.risk_constraints.max_position_size * 100.0,
+            self.risk_constraints.min_cash_reserve * 100.0,
         )
         self.current_run_id: Optional[str] = None
         self._last_rebalance_date: Optional[pd.Timestamp] = None
         self.positions_history: List[Dict[str, Any]] = []
+        self.asset_exclusions: List[AssetExclusionRecord] = []
+        self.warmup_history_shortfall_days: int = 0
     
     def run(self, tickers: List[str], start_date: str, end_date: str,
             initial_positions: Dict[str, float] = None) -> Dict:
@@ -156,12 +169,14 @@ class BacktestEngine:
         Returns:
             Dict with results including portfolio, metrics, trades
         """
-        logger.info(f"Starting backtest: {start_date} to {end_date}")
+        logger.info("Starting backtest: %s to %s", start_date, end_date)
         if not tickers:
             raise ValueError("tickers list is empty")
-        logger.info(f"Tickers: {', '.join(tickers)}")
+        logger.info("Tickers: %s", ', '.join(tickers))
         self.current_run_id = f"bt_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{uuid4().hex[:8]}"
         self.positions_history = []
+        self.asset_exclusions = []
+        self.warmup_history_shortfall_days = 0
         self._last_rebalance_date = None
         if self.audit_store:
             self.audit_store.log_event(
@@ -172,26 +187,66 @@ class BacktestEngine:
                 run_id=self.current_run_id,
             )
         
-        # Load data for all tickers
+        required_history_days = int(self.strategy.get_required_history())
+        warmup_load_start = (
+            pd.Timestamp(start_date) - pd.offsets.BDay(max(required_history_days, 0) + 5)
+        ).strftime('%Y-%m-%d')
+
+        # Load data for all tickers (including warmup lookback window)
         logger.info("Loading market data...")
         data = {}
         for ticker in tickers:
             try:
-                df = self.data_manager.load_ticker(ticker, start_date=start_date, end_date=end_date)
-                # Filter to backtest period
-                df = df.loc[start_date:]
+                df = self.data_manager.load_ticker(
+                    ticker,
+                    start_date=warmup_load_start,
+                    end_date=end_date,
+                )
                 data[ticker] = df
+            except FileNotFoundError as e:
+                self._record_asset_exclusion(
+                    ticker=ticker,
+                    date=pd.Timestamp(start_date),
+                    reason='missing_file',
+                    available_bars=0,
+                    required_bars=required_history_days,
+                    detail=str(e),
+                )
+                logger.warning("Missing data file for %s: %s", ticker, e)
+            except (pd.errors.EmptyDataError, OSError) as e:
+                self._record_asset_exclusion(
+                    ticker=ticker,
+                    date=pd.Timestamp(start_date),
+                    reason='data_error',
+                    available_bars=0,
+                    required_bars=required_history_days,
+                    detail=str(e),
+                )
+                logger.warning("Failed to load %s due to recoverable data error: %s", ticker, e)
             except Exception as e:
-                logger.error(f"Failed to load {ticker}: {e}")
+                raise RuntimeError(f"Unexpected error loading {ticker}") from e
         
         if not data:
             raise ValueError("No data loaded for any ticker")
         
-        logger.info(f"Loaded data for {len(data)} tickers")
+        logger.info("Loaded data for %s tickers", len(data))
         
         # Get unified date range (union across all tickers)
-        trading_dates = self._get_trading_dates(data, start_date, end_date)
-        logger.info(f"Backtest period: {len(trading_dates)} trading days")
+        trading_dates_all = self._get_trading_dates(data, warmup_load_start, end_date)
+        effective_start_date = self._compute_effective_start_date(
+            trading_dates_all=trading_dates_all,
+            requested_start_date=start_date,
+            required_history_days=required_history_days,
+        )
+        trading_dates = trading_dates_all[trading_dates_all >= effective_start_date]
+        logger.info(
+            "Backtest warmup alignment: requested_start=%s required_history_days=%d effective_start_date=%s shortfall_days=%d",
+            pd.Timestamp(start_date).date(),
+            required_history_days,
+            effective_start_date.date(),
+            self.warmup_history_shortfall_days,
+        )
+        logger.info("Backtest period: %s trading days", len(trading_dates))
 
         if len(trading_dates) == 0:
             raise ValueError(
@@ -208,7 +263,7 @@ class BacktestEngine:
         base_ccy = self.config['portfolio']['currency']
         unique_foreign_currencies = sorted({ccy for ccy in currencies.values() if ccy != base_ccy})
         if unique_foreign_currencies:
-            preload_start = (pd.Timestamp(start_date) - timedelta(days=30)).strftime('%Y-%m-%d')
+            preload_start = (effective_start_date - timedelta(days=30)).strftime('%Y-%m-%d')
             for foreign_ccy in unique_foreign_currencies:
                 self.fx_converter.preload_pair(foreign_ccy, base_ccy, preload_start, end_date)
         
@@ -236,13 +291,15 @@ class BacktestEngine:
                         f"Progress: {i + 1}/{len(trading_dates)} days ({pct:.1f}%) - {date.date()}",
                         flush=True,
                     )
-                    logger.info(f"Processed {i+1}/{len(trading_dates)} days")
+                    logger.info("Processed %s/%s days", i + 1, len(trading_dates))
 
             except DataIntegrityError as e:
-                logger.error(f"Critical data integrity error on {date}: {e}")
+                logger.error("Critical data integrity error on %s: %s", date, e)
                 raise
-            except Exception as e:
-                logger.error(f"Error on {date}: {e}")
+            except (ValueError, KeyError) as e:
+                # Treat value/key errors as recoverable per-day data/strategy issues.
+                # Unexpected runtime/type/attribute errors should propagate.
+                logger.error("Recoverable day-level error on %s: %s", date, e)
                 continue
         
         # Calculate final metrics
@@ -251,7 +308,7 @@ class BacktestEngine:
 
         benchmark_analysis = self._calculate_benchmark_analysis(
             equity_curve=equity_curve,
-            start_date=start_date,
+            start_date=effective_start_date.strftime('%Y-%m-%d'),
             end_date=end_date,
             tickers=tickers,
         )
@@ -294,18 +351,29 @@ class BacktestEngine:
         degradation_analysis = self._calculate_degradation_analysis(equity_curve)
         cost_sensitivity = self._run_transaction_cost_sensitivity(
             tickers=tickers,
-            start_date=start_date,
+            start_date=effective_start_date.strftime('%Y-%m-%d'),
             end_date=end_date
         )
         execution_quality = TransactionCostAnalysis.summarize(self.portfolio.trades)
-        execution_quality['fill_rate'] = None
-        execution_quality['fill_rate_reason'] = 'simulation'
         metrics.update(execution_quality)
 
-        regime_series = self._build_regime_series(equity_curve)
-        regime_perf = PerformanceMetrics.regime_performance(equity_curve, regime_series)
-        if regime_perf:
-            metrics['regime_performance'] = regime_perf
+        regime_series, regime_series_pit = self._build_regime_series_pair(equity_curve)
+        regime_perf_pit = PerformanceMetrics.regime_performance(equity_curve, regime_series_pit)
+        if regime_perf_pit:
+            metrics['regime_performance'] = regime_perf_pit
+        regime_perf_retro = PerformanceMetrics.regime_performance(equity_curve, regime_series)
+        if regime_perf_retro:
+            metrics['regime_performance_retrospective'] = regime_perf_retro
+        per_ticker_regime_series = (
+            self._build_per_ticker_regime_series(
+                market_data=data,
+                start_date=effective_start_date.strftime('%Y-%m-%d'),
+                end_date=end_date
+            )
+            if bool(self.config.get('risk', {}).get('per_ticker_regime', False))
+            else {}
+        )
+        attribution = self._calculate_strategy_attribution(equity_curve)
         
         # Compile results
         positions_history_df = pd.DataFrame(self.positions_history)
@@ -322,13 +390,20 @@ class BacktestEngine:
             'strategy': self.strategy.name,
             'tickers': tickers,
             'start_date': start_date,
+            'effective_start_date': effective_start_date.strftime('%Y-%m-%d'),
+            'required_history_days': required_history_days,
+            'warmup_history_shortfall_days': self.warmup_history_shortfall_days,
             'end_date': end_date,
             'degradation_analysis': degradation_analysis,
             'benchmark_analysis': benchmark_analysis,
             'cost_sensitivity': cost_sensitivity,
             'execution_quality': execution_quality,
             'regime_series': regime_series,
+            'regime_series_pit': regime_series_pit,
+            'per_ticker_regime_series': per_ticker_regime_series,
+            'attribution': attribution,
             'positions_history': positions_history_df,
+            'asset_exclusions': list(self.asset_exclusions),
         }
         
         logger.info("Backtest complete!")
@@ -376,7 +451,14 @@ class BacktestEngine:
                 event_type='backtest_completed',
                 source='backtest',
                 strategy=self.strategy.name,
-                details={'trade_count': trade_count, 'equity_points': points, 'metrics': metrics},
+                details={
+                    'trade_count': trade_count,
+                    'equity_points': points,
+                    'metrics': metrics,
+                    'required_history_days': required_history_days,
+                    'effective_start_date': effective_start_date.strftime('%Y-%m-%d'),
+                    'warmup_history_shortfall_days': self.warmup_history_shortfall_days,
+                },
                 run_id=self.current_run_id,
             )
 
@@ -446,15 +528,48 @@ class BacktestEngine:
             self._record_equity_and_notify(date, equity)
             return
 
-        # Build signal-history data strictly up to the prior signal date.
+        # Build signal-history data strictly up to the prior signal date,
+        # recording explicit exclusions for tickers that cannot be evaluated.
         historical_data = {}
+        required_bars = int(max(self.strategy.get_required_history(), 0))
         for ticker, df in data.items():
-            try:
-                historical_data[ticker] = df.loc[:signal_date]
-            except Exception:
+            if df is None or df.empty:
+                self._record_asset_exclusion(
+                    ticker=ticker,
+                    date=pd.Timestamp(signal_date),
+                    reason='data_error',
+                    available_bars=0,
+                    required_bars=required_bars,
+                    detail='empty dataframe',
+                )
                 continue
-        
-        
+
+            ticker_history = df.loc[:signal_date]
+            available_bars = int(len(ticker_history))
+            if available_bars < required_bars:
+                self._record_asset_exclusion(
+                    ticker=ticker,
+                    date=pd.Timestamp(signal_date),
+                    reason='insufficient_history',
+                    available_bars=available_bars,
+                    required_bars=required_bars,
+                    detail='history shorter than strategy requirement',
+                )
+                continue
+
+            if pd.Timestamp(signal_date) not in ticker_history.index:
+                self._record_asset_exclusion(
+                    ticker=ticker,
+                    date=pd.Timestamp(signal_date),
+                    reason='stale_data',
+                    available_bars=available_bars,
+                    required_bars=required_bars,
+                    detail='missing bar on signal date',
+                )
+                continue
+
+            historical_data[ticker] = ticker_history
+
         # Execute at current day open; value end-of-day equity at close.
         execution_prices = self._get_prices_for_date(data, date, field='Open')
         close_prices = self._get_prices_for_date(data, date, field='Close')
@@ -487,8 +602,10 @@ class BacktestEngine:
                     self.strategy.name,
                     type(raw_signal_meta).__name__,
                 )
-        except Exception as e:
-            logger.error(f"Strategy error on {date}: {e}")
+        except (ValueError, KeyError) as e:
+            # Recoverable strategy-data mismatch (e.g., missing key / malformed slice):
+            # hold current weights and continue simulation.
+            logger.error("Recoverable strategy error on %s: %s", date, e)
             target_weights = current_weights
             signal_meta = {}
         target_weights = target_weights or {}
@@ -543,8 +660,8 @@ class BacktestEngine:
                     historical_data,
                     method=optimizer_method
                 )
-            except Exception as e:
-                logger.warning(f"Optimization failed on {date}: {e}")
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as e:
+                logger.warning("Optimization failed on %s: %s", date, e)
                 # Keep sized weights and continue to final constraints pass.
 
         # Final risk-constraint pass so executed targets remain compliant.
@@ -801,7 +918,7 @@ class BacktestEngine:
             return (date - self._last_rebalance_date).days >= 5
         if tf == 'monthly':
             return (date + pd.tseries.offsets.BDay(1)).month != date.month
-        logger.warning(f"Unknown rebalance timeframe '{tf}', defaulting to daily")
+        logger.warning("Unknown rebalance timeframe '%s', defaulting to daily", tf)
         return True
 
     def _has_sufficient_forward_horizon(self, ticker: str, date: pd.Timestamp, data: Dict[str, pd.DataFrame]) -> bool:
@@ -843,16 +960,79 @@ class BacktestEngine:
             return pd.DatetimeIndex([])
         return date_union.sort_values()
 
+    def _compute_effective_start_date(self,
+                                      trading_dates_all: pd.DatetimeIndex,
+                                      requested_start_date: str,
+                                      required_history_days: int) -> pd.Timestamp:
+        """Compute effective simulation start date after warmup history alignment."""
+        if len(trading_dates_all) == 0:
+            raise ValueError("No trading dates available to compute effective start")
+
+        requested_ts = pd.Timestamp(requested_start_date)
+        eligible_dates = trading_dates_all[trading_dates_all >= requested_ts]
+        if len(eligible_dates) == 0:
+            raise ValueError(
+                f"No trading dates available on/after requested start {requested_start_date}"
+            )
+
+        base_date = pd.Timestamp(eligible_dates[0])
+        if required_history_days <= 0:
+            self.warmup_history_shortfall_days = 0
+            return base_date
+
+        base_idx = int(trading_dates_all.get_indexer([base_date])[0])
+        effective_idx = base_idx + int(required_history_days)
+        if effective_idx >= len(trading_dates_all):
+            shortfall_days = int(effective_idx - (len(trading_dates_all) - 1))
+            self.warmup_history_shortfall_days = shortfall_days
+            logger.warning(
+                "Insufficient trading history to satisfy warmup requirement; "
+                "falling back to requested start. required_history_days=%d available_dates=%d shortfall_days=%d",
+                required_history_days,
+                len(trading_dates_all),
+                shortfall_days,
+            )
+            return base_date
+        self.warmup_history_shortfall_days = 0
+        return pd.Timestamp(trading_dates_all[effective_idx])
+
+    def _record_asset_exclusion(self,
+                                ticker: str,
+                                date: pd.Timestamp,
+                                reason: str,
+                                available_bars: int,
+                                required_bars: int,
+                                detail: str) -> None:
+        """Record structured asset exclusion for backtest diagnostics."""
+        record = AssetExclusionRecord(
+            ticker=str(ticker),
+            date=pd.Timestamp(date),
+            reason=str(reason),
+            available_bars=int(max(available_bars, 0)),
+            required_bars=int(max(required_bars, 0)),
+            detail=str(detail),
+        )
+        self.asset_exclusions.append(record)
+        logger.debug(
+            "Asset exclusion ticker=%s date=%s reason=%s available_bars=%d required_bars=%d detail=%s",
+            record.ticker,
+            record.date.date(),
+            record.reason,
+            record.available_bars,
+            record.required_bars,
+            record.detail,
+        )
+
     def _get_prices_for_date(self, data: Dict[str, pd.DataFrame], date: pd.Timestamp,
                              field: str = 'Close') -> Dict[str, float]:
         """Get strict per-ticker prices for a specific date/field."""
         prices = {}
         for ticker, df in data.items():
             if field not in df.columns:
-                logger.warning(f"{ticker} missing '{field}' column on {date.date()}; skipping")
+                logger.warning("%s missing '%s' column on %s; skipping", ticker, field, date.date())
                 continue
             if date not in df.index:
-                logger.warning(f"{ticker} missing {date.date()} {field} bar; skipping")
+                logger.warning("%s missing %s %s bar; skipping", ticker, date.date(), field)
                 continue
             prices[ticker] = float(df.loc[date, field])
         return prices
@@ -915,20 +1095,16 @@ class BacktestEngine:
                                        currencies: Dict[str, str],
                                        date: Optional[datetime] = None) -> Dict[str, float]:
         """Compute realized ex-cash position weights."""
-        equity = float(self.portfolio.get_total_equity(prices, currencies, date=date))
-        invested_value = max(equity - float(self.portfolio.cash), 0.0)
-        if invested_value <= 0:
+        portfolio_weights = self.portfolio.get_weights(prices, currencies, date=date)
+        invested_weight = float(sum(portfolio_weights.values()))
+        if invested_weight <= 0:
             return {}
 
-        weights: Dict[str, float] = {}
-        for ticker, shares in self.portfolio.positions.items():
-            if shares <= 0 or ticker not in prices:
-                continue
-            currency = currencies.get(ticker) if currencies else None
-            value = float(self.portfolio.get_position_value(ticker, prices[ticker], currency, date=date))
-            if value > 0:
-                weights[ticker] = value / invested_value
-        return weights
+        return {
+            ticker: float(weight / invested_weight)
+            for ticker, weight in portfolio_weights.items()
+            if float(weight) > 0
+        }
 
     def _build_trade_decision_rows(self,
                                    date: pd.Timestamp,
@@ -1023,7 +1199,7 @@ class BacktestEngine:
                         'previous_equity': previous_equity,
                     },
                 )
-            except Exception as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 logger.warning(
                     "Strategy on_realized_portfolio_return hook failed on %s: %s",
                     pd.Timestamp(date).date(),
@@ -1297,11 +1473,12 @@ class BacktestEngine:
         return total
 
 
-    def _build_regime_series(self, equity_curve: pd.Series) -> pd.Series:
-        """Build retrospective regime labels for analytics output."""
+    def _build_regime_series_pair(self, equity_curve: pd.Series) -> tuple[pd.Series, pd.Series]:
+        """Build retrospective and point-in-time regime labels."""
         returns = equity_curve.pct_change().dropna()
         if returns.empty:
-            return pd.Series(dtype='object')
+            empty = pd.Series(dtype='object')
+            return empty, empty
 
         # Prefer HMM full-series decode for stable retrospective labels.
         strategy_cfg = (self.strategy.config or {}) if hasattr(self.strategy, 'config') else {}
@@ -1313,9 +1490,12 @@ class BacktestEngine:
                 detector = HMMRegimeDetector(
                     n_states=hmm_n_states,
                     covariance_type=hmm_covariance_type,
+                    min_fit_observations=60,
                 )
-                return detector.decode_full_series(returns)
-            except Exception as exc:
+                retrospective = detector.decode_full_series(returns)
+                pit = detector.decode_point_in_time(returns, min_history=detector.min_fit_observations)
+                return retrospective, pit
+            except (ValueError, RuntimeError) as exc:
                 logger.warning("HMM retrospective decode unavailable, falling back to heuristic: %s", exc)
 
         labels = {}
@@ -1325,7 +1505,107 @@ class BacktestEngine:
             if regime not in {'bull', 'neutral', 'bear'}:
                 regime = 'neutral'
             labels[dt] = regime
-        return pd.Series(labels, dtype='object')
+        heuristic = pd.Series(labels, dtype='object')
+        return heuristic, heuristic.copy()
+
+    def _build_regime_series(self, equity_curve: pd.Series) -> pd.Series:
+        """Backward-compatible accessor for retrospective regime labels."""
+        retrospective, _ = self._build_regime_series_pair(equity_curve)
+        return retrospective
+
+    def _build_per_ticker_regime_series(self, market_data: Dict[str, pd.DataFrame], start_date: str, end_date: str) -> Dict[str, pd.Series]:
+        """Build retrospective regime labels per ticker when enabled."""
+        out: Dict[str, pd.Series] = {}
+        if HMMRegimeDetector is None:
+            return out
+
+        strategy_cfg = (self.strategy.config or {}) if hasattr(self.strategy, 'config') else {}
+        hmm_n_states = int(strategy_cfg.get('hmm_n_states', 3))
+        hmm_covariance_type = str(strategy_cfg.get('hmm_covariance_type', 'full'))
+        for ticker, frame in (market_data or {}).items():
+            returns = pd.Series(dtype=float)
+            try:
+                # Slice to the effective simulation window before regime labelling.
+                sliced = frame.loc[start_date:end_date]
+                close = sliced['Close'].astype(float).dropna()
+                returns = close.pct_change().dropna()
+                if len(returns) < 60:
+                    continue
+                detector = HMMRegimeDetector(
+                    n_states=hmm_n_states,
+                    covariance_type=hmm_covariance_type,
+                    min_fit_observations=60,
+                )
+                out[ticker] = detector.decode_full_series(returns)
+            except (KeyError, ValueError, RuntimeError) as exc:
+                labels = {}
+                for dt in returns.index:
+                    hist = returns.loc[:dt]
+                    regime = AdvancedRiskAnalytics.regime_based_scaler(hist).get('regime', 'neutral')
+                    if regime not in {'bull', 'neutral', 'bear'}:
+                        regime = 'neutral'
+                    labels[dt] = regime
+                if labels:
+                    out[ticker] = pd.Series(labels, dtype='object')
+                logger.debug("Per-ticker regime decode fell back to heuristic for %s: %s", ticker, exc)
+        return out
+
+    def _calculate_strategy_attribution(self, equity_curve: pd.Series) -> Dict[str, Dict[str, float]]:
+        """Estimate per-sub-strategy contribution metrics for orchestration strategy runs."""
+        if not hasattr(self.strategy, 'get_attribution_history'):
+            return {}
+        try:
+            history = self.strategy.get_attribution_history()
+        except (AttributeError, TypeError, ValueError):
+            return {}
+        if not history:
+            return {}
+
+        returns = equity_curve.pct_change().dropna()
+        if returns.empty:
+            return {}
+
+        weights_by_strategy: Dict[str, list[float]] = {}
+        contribution_by_strategy: Dict[str, list[float]] = {}
+
+        return_index = returns.index
+        for row in history:
+            signal_dt = pd.Timestamp(row.get('date')) if isinstance(row, dict) and row.get('date') is not None else None
+            alloc = row.get('strategy_allocations', {}) if isinstance(row, dict) else {}
+            if signal_dt is None or not isinstance(alloc, dict):
+                continue
+
+            exec_pos = return_index.searchsorted(signal_dt, side='right')
+            if exec_pos >= len(return_index):
+                continue
+
+            portfolio_ret = float(returns.iloc[exec_pos])
+            for strategy_name, ticker_alloc in alloc.items():
+                total_weight = float(sum((ticker_alloc or {}).values())) if isinstance(ticker_alloc, dict) else 0.0
+                weights_by_strategy.setdefault(strategy_name, []).append(total_weight)
+                contribution_by_strategy.setdefault(strategy_name, []).append(total_weight * portfolio_ret)
+
+        out: Dict[str, Dict[str, float]] = {}
+        for strategy_name, contrib_values in contribution_by_strategy.items():
+            contrib = pd.Series(contrib_values, dtype=float)
+            if contrib.empty:
+                continue
+            eq = (1.0 + contrib).cumprod()
+            running_max = eq.cummax()
+            drawdown = ((eq - running_max) / running_max).min() if len(eq) else 0.0
+            vol = float(contrib.std() * np.sqrt(252))
+            ann = float(contrib.mean() * 252)
+            sharpe = float(ann / vol) if vol > 0 else 0.0
+            out[strategy_name] = {
+                'total_return': float(eq.iloc[-1] - 1.0),
+                'annualized_return': ann,
+                'volatility': vol,
+                'max_drawdown': float(abs(drawdown)),
+                'sharpe_ratio': sharpe,
+                'weight_fraction': float(np.mean(weights_by_strategy.get(strategy_name, [0.0]))),
+                'contribution_to_portfolio_return': float(contrib.sum()),
+            }
+        return out
 
     def _calculate_benchmark_analysis(self, equity_curve: pd.Series,
                                       start_date: str, end_date: str,
@@ -1352,8 +1632,8 @@ class BacktestEngine:
             for ticker in tickers:
                 try:
                     ticker_data = self.data_manager.load_ticker(ticker, start_date, end_date)
-                except Exception as exc:
-                    logger.warning(f"Skipping {ticker} in equal-weight benchmark: {exc}")
+                except (FileNotFoundError, KeyError, pd.errors.EmptyDataError, OSError, ValueError) as exc:
+                    logger.warning("Skipping %s in equal-weight benchmark: %s", ticker, exc)
                     continue
 
                 if ticker_data.empty or 'Close' not in ticker_data.columns:
@@ -1376,8 +1656,8 @@ class BacktestEngine:
         if benchmark_close is None:
             try:
                 benchmark_data = self.data_manager.load_ticker(benchmark_ticker, start_date, end_date)
-            except Exception as exc:
-                logger.warning(f"Benchmark {benchmark_ticker} unavailable: {exc}")
+            except (FileNotFoundError, KeyError, pd.errors.EmptyDataError, OSError, ValueError) as exc:
+                logger.warning("Benchmark %s unavailable: %s", benchmark_ticker, exc)
                 primary = {'available': False, 'reason': f'benchmark_load_failed: {exc}'}
             else:
                 if benchmark_data.empty or 'Close' not in benchmark_data.columns:
@@ -1410,7 +1690,7 @@ class BacktestEngine:
                     )
                 else:
                     spy_analysis = {'available': False, 'reason': 'spy_missing_close'}
-            except Exception as exc:
+            except (FileNotFoundError, KeyError, pd.errors.EmptyDataError, OSError, ValueError) as exc:
                 spy_analysis = {'available': False, 'reason': f'spy_load_failed: {exc}'}
 
         primary['spy_analysis'] = spy_analysis

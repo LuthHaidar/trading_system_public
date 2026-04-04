@@ -1,32 +1,22 @@
 portfolio:
-  initial_capital: 5000
+  initial_capital: 10000
   currency: SGD
 
 execution:
   timing: close
   rebalance_timeframe: weekly  # daily | weekly | monthly; weekly lowers turnover vs daily
-  hold_weight_epsilon: 0.0001  # Skip rebalance when max |target-current| <= 1bp per position
+  hold_weight_epsilon: 0.0001  # Skip rebalance when max |target-current| <= this threshold per position
   min_rebalance_weight_delta: 0.02  # Skip rebalance when total L1 drift is below this threshold
   min_trade_value: 200.0  # Minimum per-position trade value (base currency); smaller targets are dropped
-  invested_sleeve_drift_warn: 0.20  # L1 drift on ex-cash sleeve (small-capital tolerant)
+  invested_sleeve_drift_warn: 0.20  # L1 drift on ex-cash sleeve
   cash_drift_warn: 0.05  # Absolute drift vs target cash allocation
   drift_warn_min_capital: 50000  # Suppress drift warnings when equity is below this level
-  target_weight_drift_warn: 0.05  # Backward-compat fallback for invested_sleeve_drift_warn
   uninvested_cash_tolerance: 0.005  # 50 bps target ceiling for residual cash after sizing
-  min_forward_data_days: 5  # Minimum bars required after trade date before allowing BUY/ENTRY/INCREASE
+  min_forward_data_days: 5  # Minimum bars required before allowing BUY/ENTRY/INCREASE; must >= data.max_stale_price_days
   cost_aware_fee_bps: 5.0  # Conservative fee haircut used by cost-aware share solver
   cost_aware_spread_bps: 5.0  # Conservative spread haircut used by cost-aware share solver
   
 costs:
-  # IBKR Pro US stocks tiered pricing
-  commission_per_share: 0.0035
-  commission_min: 0.35
-  commission_max_pct: 0.01  # 1% of trade value
-  
-  # Non-US stocks
-  non_us_commission_rate: 0.001  # 0.1%
-  non_us_commission_min: 4.0
-
   # Composable fee components
   components:
     broker:
@@ -34,7 +24,7 @@ costs:
       us_commission_per_share: 0.0035
       us_commission_min: 0.35
       us_commission_max_pct: 0.01
-      non_us_commission_rate: 0.001
+      non_us_commission_rate: 0.0005
       non_us_commission_min: 4.0
     regulatory:
       enabled: true
@@ -52,28 +42,28 @@ costs:
         L:  # UK stamp duty on buys
           rate: 0.005
           side: BUY
-        HK:  # Hong Kong stamp duty (illustrative)
-          rate: 0.001
-          side: BOTH
+        # HK:  # Hong Kong stamp duty (illustrative)
+        #   rate: 0.001
+        #   side: BOTH
   
   # FX conversion
-  fx_conversion_rate: 0.00002  # 0.002% (2 bps)
+  fx_conversion_rate: 0.00002 # applied to non-base currency trades for cost estimation
   
-  # Slippage (basis points)
+  # Slippage (used for heuristic model and as a sanity check for cost-aware sizing)
   slippage_bps:
     high_liquidity: 2
     medium_liquidity: 5
     low_liquidity: 10
 
 
-  # Bid/ask spread simulation (basis points, v1)
+  # Bid/ask spread simulation ("real" spread used by execution for execution price)
   spread_bps:
     high_liquidity: 1.0
     medium_liquidity: 3.0
     low_liquidity: 8.0
 
   slippage_model:
-    mode: parameterized  # 'heuristic' (legacy) or 'parameterized'
+    mode: parameterized  # 'heuristic' or 'parameterized'
     default_bucket: high_liquidity
     spread_weight: 0.5
     volatility_weight: 25.0
@@ -81,40 +71,39 @@ costs:
     participation_exponent: 0.6
     max_participation_rate: 1.0
     max_slippage_bps: 100.0
-    bucket_base_bps:
+    bucket_base_bps: # only used by parameterized model; base slippage per bucket before adjustments
       high_liquidity: 2
       medium_liquidity: 5
       low_liquidity: 10
-    bucket_spread_proxy_bps:
+    bucket_spread_proxy_bps: # bid/ask spread to estimate slippage per bucket; only used by parameterized model (differs from actual spread_bps to allow tuning of slippage vs spread relationship)
       high_liquidity: 1.0
       medium_liquidity: 2.5
       low_liquidity: 5.0
-    bucket_overrides: {}
+    bucket_overrides: {} # Optional per-ticker slippage bucket overrides, e.g. {'AAPL': 'medium_liquidity'}
 
 risk:
   # Position sizing
-  position_sizing_method: target_vol  # 'equal', 'volatility', 'inverse_volatility', 'kelly', 'target_vol' (legacy alias: 'risk_parity')
+  position_sizing_method: target_vol  # 'equal', 'volatility', 'inverse_volatility', 'kelly', 'target_vol'
   
   # Position limits
-  max_position_size: 0.40  # 40% per position
-  min_position_size: 0.01  # 1% minimum
+  max_position_size: 0.10 
+  min_position_size: 0.01 # skip targets below this weight after initial sizing, before optimization and constraints
   
   # Portfolio constraints
   max_positions: 10
-  min_cash_reserve: 0.05  # 5% minimum cash
+  min_cash_reserve: 0.05
   
-  # Sector/correlation limits
-  max_sector_exposure: 0.40  # 40% max in any sector
-  max_correlation: 0.90  # Reduce positions if correlation > 90%
+  # Correlation limits
+  max_correlation: 0.90  # Reduce positions if correlation exceeds this threshold
   min_diversification_score: 0.10  # Scale down exposure when correlation diversification is too low
   diversification_scale_floor: 0.50  # Min exposure scale when diversification floor is breached
   
   # Volatility targeting
-  target_volatility: 0.15  # 15% annual target (for target_vol method)
+  target_volatility: 0.15 # Target portfolio volatility (e.g. 0.15 for 15% annualized)
   volatility_window: 60  # Days for volatility calculation
   
   # Kelly criterion
-  kelly_fraction: 0.5  # Half-Kelly for safety
+  kelly_fraction: 0.5 # Fraction of full Kelly allocation to use (e.g. 0.25 for 25% Kelly)
   kelly_window: 252  # Days for Kelly calculation
   kelly_max_total_exposure: 0.95  # Cap summed Kelly fractions before constraints
   capping_warning_every: 50  # Repeat cap warning every N occurrences per ticker
@@ -122,19 +111,18 @@ risk:
   # Optimization
   use_optimizer: true  # Enable portfolio optimization
   optimizer_method: risk_parity  # 'max_sharpe', 'min_variance', 'risk_parity'
-  optimizer_max_weight: 0.30
-  optimizer_min_weight: 0.0
-  covariance_estimator: ledoit_wolf  # sample | ledoit_wolf | shrinkage
+  optimizer_max_weight: 0.30 # Maximum weight per position after optimization; helps enforce diversification and liquidity constraints
+  optimizer_min_weight: 0.0 # Minimum weight per position after optimization; set to 0 to allow zero-weight positions
+  covariance_estimator: ledoit_wolf  # sample | ledoit_wolf | shrinkage | exponential | exponential_shrinkage
   covariance_shrinkage: 0.10  # Used by shrinkage fallback/estimator
-  risk_free_rate: 0.02
+  covariance_ew_halflife: 63  # Half-life in trading days for exponential covariance estimators
+  risk_free_rate: 0.02 # Annualized risk-free rate used for Sharpe ratio calculation in optimization
   
 data:
   data_dir: ./data
   cache_size: 100
-  max_stale_price_days: 5  # Max allowed stale price days before stale policy is triggered
-  strict_stale_price: false  # Legacy compatibility: true maps to on_stale_price=halt
+  max_stale_price_days: 5  # Max allowed stale valuation sessions before the run halts
   freshness_threshold_days: 3  # Trigger forward update when cache tail is older than this
-  on_stale_price: force_close  # force_close | halt
   fx_cache_staleness_days: 1  # Reuse cached FX CSV if within this many days of backtest end date
   use_adjusted_close: true  # Use Adj Close as Close when available
   

@@ -78,7 +78,7 @@ class CurrencyConverter:
         self.fx_cache_ttl_seconds = 3600
         self.fx_retry_attempts = 3
         self.fx_retry_backoff_seconds = 1.0
-        logger.info(f"CurrencyConverter initialized with base currency: {base_currency}")
+        logger.info("CurrencyConverter initialized with base currency: %s", base_currency)
 
     def preload_pair(
         self,
@@ -346,18 +346,20 @@ class CurrencyConverter:
         data = yf.download(fx_ticker, start=start, end=end, progress=False)
 
         if len(data) == 0:
-            logger.warning(f"No FX data around {date.date()}, using latest rate")
+            logger.warning("No FX data around %s, using latest rate", date.date())
             return self._get_latest_fx_rate(fx_ticker)
 
         close_series = self._coerce_close_series(data['Close'])
         if len(close_series) == 0:
-            logger.warning(f"No FX close history for {fx_ticker}, using latest rate")
+            logger.warning("No FX close history for %s, using latest rate", fx_ticker)
             return self._get_latest_fx_rate(fx_ticker)
 
         rate = close_series.asof(date)
         if pd.isna(rate):
             logger.warning(
-                f"No FX history up to {date.date()} for {fx_ticker}, using latest rate"
+                "No FX history up to %s for %s, using latest rate",
+                date.date(),
+                fx_ticker,
             )
             return self._get_latest_fx_rate(fx_ticker)
 

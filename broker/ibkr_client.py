@@ -1,4 +1,4 @@
-from ib_insync import IB, Stock, MarketOrder, LimitOrder, Contract, Order
+from ib_insync import IB, Stock, MarketOrder, LimitOrder, Contract, Order, Trade
 import pandas as pd
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,8 +51,7 @@ class IBKRClient:
         self._contract_cache: Dict[str, Contract] = {}
         self.contract_overrides = config.get('contract_overrides', {}) or {}
         
-        logger.info(f"IBKR Client initialized: {self.host}:{self.port} "
-                   f"({'PAPER' if self.paper_trading else 'LIVE'} trading)")
+        logger.info("IBKR Client initialized: %s:%s (%s trading)", self.host, self.port, "PAPER" if self.paper_trading else "LIVE")
     
     def connect(self) -> bool:
         """
@@ -66,7 +65,7 @@ class IBKRClient:
                 logger.warning("Already connected")
                 return True
             
-            logger.info(f"Connecting to IBKR at {self.host}:{self.port}...")
+            logger.info("Connecting to IBKR at %s:%s...", self.host, self.port)
             self.ib.connect(
                 host=self.host,
                 port=self.port,
@@ -79,14 +78,13 @@ class IBKRClient:
             
             # Log account info
             account_info = self.get_account_summary()
-            logger.info(f"Connected successfully to account: {account_info.get('account_id', 'Unknown')}")
-            logger.info(f"Account value: {account_info.get('net_liquidation', 0):,.2f} "
-                       f"{account_info.get('currency', 'USD')}")
+            logger.info("Connected successfully to account: %s", account_info.get('account_id', 'Unknown'))
+            logger.info("Account value: %,.2f %s", account_info.get('net_liquidation', 0), account_info.get('currency', 'USD')  )
             
             return True
             
         except Exception as e:
-            logger.error(f"Connection failed: {e}")
+            logger.error("Connection failed: %s", e)
             self.connected = False
             return False
     
@@ -98,7 +96,7 @@ class IBKRClient:
                 self.connected = False
                 logger.info("Disconnected from IBKR")
             except Exception as e:
-                logger.error(f"Error disconnecting: {e}")
+                logger.error("Error disconnecting: %s", e)
     
     def reconnect(self) -> bool:
         """Attempt to reconnect"""
@@ -117,7 +115,7 @@ class IBKRClient:
             self.ib.reqCurrentTime()
             return True
         except Exception as exc:
-            logger.debug(f"IBKR connection heartbeat failed: {exc}")
+            logger.debug("IBKR connection heartbeat failed: %s", exc)
             self.connected = False
             return False
     
@@ -152,7 +150,7 @@ class IBKRClient:
             return summary
             
         except Exception as e:
-            logger.error(f"Error getting account summary: {e}")
+            logger.error("Error getting account summary: %s", e)
             return {}
     
     def get_positions(self) -> Dict[str, Dict]:
@@ -183,11 +181,11 @@ class IBKRClient:
                     'contract': position.contract
                 }
             
-            logger.info(f"Current positions: {len(position_dict)} tickers")
+            logger.info("Current positions: %d tickers", len(position_dict))
             return position_dict
             
         except Exception as e:
-            logger.error(f"Error getting positions: {e}")
+            logger.error("Error getting positions: %s", e)
             return {}
     
     def create_contract(self, ticker: str, exchange: str = 'SMART',
@@ -284,7 +282,7 @@ class IBKRClient:
         return qualified[0]
 
     def place_market_order(self, ticker: str, quantity: int,
-                          action: str = 'BUY') -> Optional[Order]:
+                          action: str = 'BUY') -> Optional[Trade]:
         """
         Place market order
         
@@ -309,7 +307,7 @@ class IBKRClient:
             # Duplicate trade prevention against currently open orders / recent intents
             order_key = (ticker, abs(quantity), action)
             if order_key in self._recent_orders:
-                logger.warning(f"Duplicate order prevented: {order_key}")
+                logger.warning("Duplicate order prevented: %s", order_key)
                 return None
 
             open_orders = self.get_open_orders()
@@ -317,24 +315,24 @@ class IBKRClient:
                 if (open_trade.contract.symbol == ticker and
                         open_trade.order.action == action and
                         int(open_trade.order.totalQuantity) == int(abs(quantity))):
-                    logger.warning(f"Duplicate open order detected, skipping: {order_key}")
+                    logger.warning("Duplicate open order detected, skipping: %s", order_key)
                     return None
 
             # Place order
             trade = self.ib.placeOrder(contract, order)
             self._recent_orders.add(order_key)
             
-            logger.info(f"Placed {action} order: {quantity} {ticker}")
-            logger.debug(f"Order ID: {trade.order.orderId}")
+            logger.info("Placed %s order: %d %s", action, quantity, ticker)
+            logger.debug("Order ID: %s", trade.order.orderId)
             
             return trade
             
         except Exception as e:
-            logger.error(f"Error placing market order for {ticker}: {e}")
+            logger.error("Error placing market order for %s: %s", ticker, e)
             return None
     
     def place_limit_order(self, ticker: str, quantity: int,
-                         limit_price: float, action: str = 'BUY') -> Optional[Order]:
+                         limit_price: float, action: str = 'BUY') -> Optional[Trade]:
         """
         Place limit order
         
@@ -357,11 +355,11 @@ class IBKRClient:
             order = LimitOrder(action, abs(quantity), limit_price)
             trade = self.ib.placeOrder(contract, order)
             
-            logger.info(f"Placed {action} limit order: {quantity} {ticker} @ {limit_price}")
+            logger.info("Placed %s limit order: %d %s @ %f", action, quantity, ticker, limit_price)
             return trade
             
         except Exception as e:
-            logger.error(f"Error placing limit order for {ticker}: {e}")
+            logger.error("Error placing limit order for %s: %s", ticker, e)
             return None
     
     def cancel_order(self, order) -> bool:
@@ -376,10 +374,10 @@ class IBKRClient:
         """
         try:
             self.ib.cancelOrder(order.order)
-            logger.info(f"Cancelled order {order.order.orderId}")
+            logger.info("Cancelled order %s", order.order.orderId)
             return True
         except Exception as e:
-            logger.error(f"Error cancelling order: {e}")
+            logger.error("Error cancelling order: %s", e)
             return False
     
     def get_open_orders(self) -> List:
@@ -389,10 +387,10 @@ class IBKRClient:
         
         try:
             trades = self.ib.openTrades()
-            logger.info(f"Open orders: {len(trades)}")
+            logger.info("Open orders: %d", len(trades))
             return trades
         except Exception as e:
-            logger.error(f"Error getting open orders: {e}")
+            logger.error("Error getting open orders: %s", e)
             return []
     
     def wait_for_fills(self, timeout: int = 60) -> bool:
@@ -414,10 +412,10 @@ class IBKRClient:
                 logger.info("All orders filled")
                 return True
             
-            logger.info(f"Waiting for {len(open_orders)} orders to fill...")
+            logger.info("Waiting for %d orders to fill...", len(open_orders))
             time.sleep(2)
         
-        logger.warning(f"Timeout waiting for orders to fill")
+        logger.warning("Timeout waiting for orders to fill")
         return False
     
     def get_market_price(self, ticker: str) -> Optional[float]:
@@ -452,12 +450,12 @@ class IBKRClient:
             self.ib.cancelMktData(contract)
             
             if price:
-                logger.debug(f"{ticker} price: {price}")
+                logger.debug("%s price: %f", ticker, price)
             
             return price
             
         except Exception as e:
-            logger.error(f"Error getting market price for {ticker}: {e}")
+            logger.error("Error getting market price for %s: %s", ticker, e)
             return None
     
     def get_market_prices(self, tickers: List[str]) -> Dict[str, float]:
@@ -482,7 +480,7 @@ class IBKRClient:
                 contract = self._ensure_contract_qualified(ticker)
                 market_data_handles.append((ticker, contract, self.ib.reqMktData(contract)))
             except Exception as exc:
-                logger.error(f"Error requesting market data for {ticker}: {exc}")
+                logger.error("Error requesting market data for %s: %s", ticker, exc)
 
         # Single wait after issuing all reqMktData calls keeps wall time near O(1)
         # for the batch rather than O(n) sequential waits.
@@ -502,14 +500,14 @@ class IBKRClient:
 
                 if price:
                     prices[ticker] = price
-                    logger.debug(f"{ticker} price: {price}")
+                    logger.debug("%s price: %f", ticker, price)
             except Exception as exc:
-                logger.error(f"Error parsing market data for {ticker}: {exc}")
+                logger.error("Error parsing market data for %s: %s", ticker, exc)
             finally:
                 try:
                     self.ib.cancelMktData(contract)
                 except Exception as cancel_exc:
-                    logger.warning(f"Error cancelling market data for {ticker}: {cancel_exc}")
+                    logger.warning("Error cancelling market data for %s: %s", ticker, cancel_exc)
 
         return prices
     
@@ -545,9 +543,9 @@ class IBKRClient:
         
         invalid_targets = [t for t, qty in target_positions.items() if qty < 0]
         if invalid_targets:
-            logger.error(f"Reconciliation check failed: negative targets for {invalid_targets}")
+            logger.error("Reconciliation check failed: negative targets for %s", invalid_targets)
 
-        logger.info(f"Reconciliation: {len(orders)} orders needed")
+        logger.info("Reconciliation: %d orders needed", len(orders))
         return orders
     
     def execute_rebalance(self, target_positions: Dict[str, int]) -> bool:
@@ -582,7 +580,7 @@ class IBKRClient:
             if trade:
                 trades.append(trade)
             else:
-                logger.error(f"Failed to place order: {action} {quantity} {ticker}")
+                logger.error("Failed to place order: %s %d %s", action, quantity, ticker)
         
         # Wait for fills
         if trades:

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Any, Dict, Optional
 from utils.logger import get_logger
+from utils.types import TickerData, WeightMap
 
 logger = get_logger(__name__)
 
@@ -29,11 +30,11 @@ class BaseStrategy(ABC):
         self._weight_normalization_warned = False
         self._last_signal_meta: Dict[str, Dict[str, Any]] = {}
 
-        self.logger.info(f"Initialized {self.name} with config: {config}")
+        self.logger.info("Initialized %s with config: %s", self.name, config)
     
     @abstractmethod
-    def generate_signals(self, date: pd.Timestamp, data: Dict[str, pd.DataFrame],
-                        current_positions: Dict[str, float]) -> Dict[str, float]:
+    def generate_signals(self, date: pd.Timestamp, data: TickerData,
+                        current_positions: WeightMap) -> WeightMap:
         """
         Generate target weights for each ticker
         
@@ -79,7 +80,7 @@ class BaseStrategy(ABC):
         """
         return dict(self._last_signal_meta or {})
     
-    def validate_signals(self, signals: Dict[str, float]) -> Dict[str, float]:
+    def validate_signals(self, signals: WeightMap) -> WeightMap:
         """
         Validate and normalize signals
         
@@ -102,11 +103,12 @@ class BaseStrategy(ABC):
             if not self._weight_normalization_warned:
                 self._weight_normalization_warned = True
                 self.logger.warning(
-                    f"Total weight {total:.4f} > 1.0, normalizing "
-                    f"(first occurrence; further normalizations logged at debug)"
+                    "Total weight %.4f > 1.0, normalizing "
+                    "(first occurrence; further normalizations logged at debug)",
+                    total,
                 )
             else:
-                self.logger.debug(f"Total weight {total:.4f} > 1.0, normalizing")
+                self.logger.debug("Total weight %.4f > 1.0, normalizing", total)
             signals = {k: v/total for k, v in signals.items()}
         
         # Round to avoid floating point issues

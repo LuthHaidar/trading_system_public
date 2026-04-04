@@ -111,9 +111,13 @@ def test_cross_field_min_forward_must_cover_max_stale():
     with pytest.raises(ValueError):
         validate_main_config(cfg)
 
-
-def test_on_stale_price_must_be_valid_value():
+def test_kelly_fraction_bounds_enforced():
     cfg = _valid_config()
-    cfg['data']['on_stale_price'] = 'skip'
-    with pytest.raises(ValueError):
+    cfg['risk']['kelly_fraction'] = 0.0
+    with pytest.raises(ValidationError):
+        validate_main_config(cfg)
+
+    cfg = _valid_config()
+    cfg['risk']['kelly_fraction'] = 1.1
+    with pytest.raises(ValidationError):
         validate_main_config(cfg)

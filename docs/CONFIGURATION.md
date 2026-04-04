@@ -22,11 +22,9 @@ Unknown top-level sections are rejected.
 ### execution
 - `rebalance_timeframe` (`str`, required)
 - `timing` (`str`, required)
-  - Canonical execution timing/session key used throughout backtesting and execution APIs.
 - `progress_log_interval` (`int`, default `50`)
 - `hold_weight_epsilon` (`float`, default `1e-4`)
 - `invested_sleeve_drift_warn` (`float`, default `0.05`)
-- `target_weight_drift_warn` (`float`, default `0.05`)
 - `cash_drift_warn` (`float`, default `0.01`)
 - `drift_warn_min_capital` (`float`, default `0.0`)
 - `uninvested_cash_tolerance` (`float`, default `0.005`)
@@ -38,12 +36,10 @@ Unknown top-level sections are rejected.
 - `max_position_size` (`float`, required)
 - `min_position_size` (`float`, required)
 - `volatility_window` (`int`, default `60`)
-- Unknown risk keys are rejected.
 
 ### data
 - `data_dir` (`str`, required)
 - `max_stale_price_days` (`int`, default `5`)
-- `strict_stale_price` (`bool`, default `false`)
 - `fx_cache_staleness_days` (`int`, default `1`)
 - `cache_size` (`int | null`, optional)
 
@@ -85,12 +81,6 @@ Unknown top-level sections are rejected.
 On validation failure, the process exits with a clear error message.
 
 
-## Rejected legacy keys
-
-- `execution.frequency` is not supported and will fail validation.
-- `data.update_hour` is not supported and will fail validation.
-
-
 ### Strategies-level contract definitions (optional)
 
 `config/strategies.yaml` may define a top-level `contracts` mapping as a convenience for live IBKR routing:
@@ -110,4 +100,3 @@ contracts:
 
 At runtime, `main.py` loads this mapping and merges it into `ibkr.contract_overrides` before creating `IBKRClient`.
 If the same ticker exists in both places, `ibkr.contract_overrides` wins.
-

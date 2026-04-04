@@ -5,7 +5,10 @@ import pandas as pd
 
 from backtesting.engine import BacktestEngine
 from backtesting.portfolio import DataStalenessError, Portfolio
-from broker.ibkr_client import IBKRClient
+try:
+    from broker.ibkr_client import IBKRClient
+except ModuleNotFoundError:
+    IBKRClient = None
 
 
 class SelectiveStrategy:
@@ -50,7 +53,7 @@ class ImmediateBugRegressionTests(unittest.TestCase):
                 'use_optimizer': False,
                 'covariance_estimator': 'sample',
             },
-            'data': {'max_stale_price_days': 3, 'strict_stale_price': False, 'on_stale_price': 'force_close'},
+            'data': {'max_stale_price_days': 3},
             'data_platform': {'enabled': False},
         }
 
@@ -71,8 +74,8 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         self.assertGreater(len(results['trades']), 0)
         self.assertEqual(results['trades'][0].ticker, 'AAA')
 
-    def test_b2_carry_forward_and_strict_stale_price_threshold(self):
-        portfolio = Portfolio(initial_capital=1000.0, base_currency='USD', max_stale_price_days=2, strict_stale_price=False)
+    def test_b2_carry_forward_and_stale_price_threshold(self):
+        portfolio = Portfolio(initial_capital=1000.0, base_currency='USD', max_stale_price_days=2)
         portfolio.positions = {'AAA': 1.0}
 
         # Day 1 explicit price
@@ -86,10 +89,29 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         day3 = pd.Timestamp('2024-01-03')
         self.assertAlmostEqual(portfolio.get_total_equity({}, {'AAA': 'USD'}, date=day3), 1100.0)
 
-        # Day 4 exceeds stale threshold and in strict mode raises
-        portfolio.on_stale_price = 'halt'
+        # Day 4 exceeds stale threshold and raises.
         with self.assertRaises(DataStalenessError):
             portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-04'))
+
+    def test_b2_stale_threshold_uses_valuation_sessions_not_calendar_days(self):
+        portfolio = Portfolio(initial_capital=1000.0, base_currency='USD', max_stale_price_days=1)
+        portfolio.positions = {'AAA': 1.0}
+        portfolio.position_currencies = {'AAA': 'USD'}
+
+        friday = pd.Timestamp('2024-01-05')
+        monday = pd.Timestamp('2024-01-08')
+        tuesday = pd.Timestamp('2024-01-09')
+
+        self.assertAlmostEqual(
+            portfolio.get_total_equity({'AAA': 100.0}, {'AAA': 'USD'}, date=friday),
+            1100.0,
+        )
+        self.assertAlmostEqual(
+            portfolio.get_total_equity({}, {'AAA': 'USD'}, date=monday),
+            1100.0,
+        )
+        with self.assertRaises(DataStalenessError):
+            portfolio.get_total_equity({}, {'AAA': 'USD'}, date=tuesday)
 
     def test_b4_initial_positions_are_applied_on_first_bar(self):
         idx = pd.bdate_range('2024-01-01', periods=10)
@@ -105,6 +127,8 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         self.assertIn('AAA', engine.portfolio.positions)
         self.assertGreater(engine.portfolio.positions['AAA'], 0)
         self.assertLess(results['equity_curve'].iloc[0], 100_000.0)
+        self.assertEqual(results['effective_start_date'], '2024-01-01')
+        self.assertGreater(results.get('warmup_history_shortfall_days', 0), 0)
 
     def test_b4_initial_positions_reject_unknown_ticker(self):
         idx = pd.bdate_range('2024-01-01', periods=5)
@@ -154,7 +178,7 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         self.assertEqual(list(trading_dates), [pd.Timestamp('2024-01-02'), pd.Timestamp('2024-01-03')])
 
     def test_b10_current_weights_include_stale_held_positions(self):
-        portfolio = Portfolio(initial_capital=0.0, base_currency='USD', max_stale_price_days=3, strict_stale_price=False)
+        portfolio = Portfolio(initial_capital=0.0, base_currency='USD', max_stale_price_days=3)
         portfolio.positions = {'AAA': 1.0, 'BBB': 1.0}
 
         day1 = pd.Timestamp('2024-01-02')
@@ -173,32 +197,30 @@ class ImmediateBugRegressionTests(unittest.TestCase):
 
 
 
-    def test_strict_stale_price_overrides_force_close_policy_to_halt(self):
+    def test_stale_breach_raises_without_policy_switches(self):
         portfolio = Portfolio(
             initial_capital=1000.0,
             base_currency='USD',
             max_stale_price_days=1,
-            strict_stale_price=True,
-            on_stale_price='force_close',
         )
-        self.assertEqual(portfolio.on_stale_price, 'halt')
         portfolio.positions = {'AAA': 1.0}
 
         portfolio.get_total_equity({'AAA': 100.0}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-01'))
+        portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-03'))
         with self.assertRaises(DataStalenessError):
-            portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-03'))
+            portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-04'))
 
-    def test_stale_force_close_liquidates_instead_of_silent_drop(self):
-        portfolio = Portfolio(initial_capital=1000.0, base_currency='USD', max_stale_price_days=1, on_stale_price='force_close')
+    def test_stale_breach_does_not_liquidate_position(self):
+        portfolio = Portfolio(initial_capital=1000.0, base_currency='USD', max_stale_price_days=1)
         portfolio.positions = {'AAA': 2.0}
         portfolio.position_currencies = {'AAA': 'USD'}
 
         portfolio.get_total_equity({'AAA': 50.0}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-01'))
-        equity = portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-03'))
-
-        self.assertAlmostEqual(equity, 1100.0)
-        self.assertNotIn('AAA', portfolio.positions)
-        self.assertTrue(any(t.decision_reason == 'FORCE_CLOSE_STALE_DATA' for t in portfolio.trades))
+        portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-03'))
+        with self.assertRaises(DataStalenessError):
+            portfolio.get_total_equity({}, {'AAA': 'USD'}, date=pd.Timestamp('2024-01-04'))
+        self.assertIn('AAA', portfolio.positions)
+        self.assertEqual(len(portfolio.trades), 0)
 
 
 
@@ -252,7 +274,6 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         cfg = self._base_config()
         cfg['execution']['min_forward_data_days'] = 1
         cfg['data']['max_stale_price_days'] = 1
-        cfg['data']['on_stale_price'] = 'halt'
 
         aaa_idx = pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03'])
         bbb_idx = pd.bdate_range('2024-01-01', periods=8)
@@ -268,11 +289,10 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         with self.assertRaises(DataStalenessError):
             engine.run(['AAA', 'BBB'], '2024-01-01', '2024-01-15')
 
-    def test_force_close_policy_prevents_phantom_collapse_in_engine_path(self):
+    def test_engine_stale_breach_halts_without_force_close_path(self):
         cfg = self._base_config()
         cfg['execution']['min_forward_data_days'] = 1
         cfg['data']['max_stale_price_days'] = 1
-        cfg['data']['on_stale_price'] = 'force_close'
 
         aaa_idx = pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03'])
         bbb_idx = pd.bdate_range('2024-01-01', periods=8)
@@ -285,12 +305,10 @@ class ImmediateBugRegressionTests(unittest.TestCase):
             config=cfg,
         )
 
-        results = engine.run(['AAA', 'BBB'], '2024-01-01', '2024-01-15')
+        with self.assertRaises(DataStalenessError):
+            engine.run(['AAA', 'BBB'], '2024-01-01', '2024-01-15')
 
-        self.assertTrue(any(t.decision_reason == 'FORCE_CLOSE_STALE_DATA' for t in results['trades']))
-        self.assertNotIn('AAA', engine.portfolio.positions)
-        self.assertGreater(results['equity_curve'].min(), 0.0)
-
+    @unittest.skipUnless(IBKRClient is not None, "ib_insync not installed")
     def test_b15_get_positions_reconstructs_exchange_suffix(self):
         client = IBKRClient({'host': '127.0.0.1', 'port': 7497, 'client_id': 1})
         client.connected = True

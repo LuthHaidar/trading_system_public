@@ -42,8 +42,11 @@ class StrategyOrchestrationStrategy(BaseStrategy):
                     n_states=self.hmm_n_states,
                     covariance_type=self.hmm_covariance_type,
                 )
-            except Exception as exc:
-                self.logger.warning(f"HMM detector unavailable, using heuristic regime detection: {exc}")
+            except (ValueError, TypeError, RuntimeError) as exc:
+                self.logger.warning(
+                    "HMM detector unavailable, using heuristic regime detection: %s",
+                    exc,
+                )
 
         self.sub_strategies = self._build_enabled_sub_strategies()
         self.sub_strategy_names = list(self.sub_strategies.keys())
@@ -57,6 +60,7 @@ class StrategyOrchestrationStrategy(BaseStrategy):
         }
         self.last_strategy_weights: Dict[str, float] = {}
         self.last_update_date: pd.Timestamp | None = None
+        self._attribution_history: list[Dict[str, Any]] = []
 
     def _build_enabled_sub_strategies(self) -> Dict[str, BaseStrategy]:
         sub_strategies: Dict[str, BaseStrategy] = {}
@@ -81,7 +85,7 @@ class StrategyOrchestrationStrategy(BaseStrategy):
 
     def get_required_history(self) -> int:
         if not self.sub_strategies:
-            return 1
+            return 0
         return max(s.get_required_history() for s in self.sub_strategies.values())
 
     def _detect_market_condition(self, date: pd.Timestamp, data: Dict[str, pd.DataFrame]) -> str:
@@ -113,6 +117,7 @@ class StrategyOrchestrationStrategy(BaseStrategy):
                 bear_return_threshold=self.regime_bear_return_threshold,
             ).get('regime', 'unknown')
 
+        assert regime in {'bull', 'neutral', 'bear'}, f"Unrecognized regime label: {regime!r}"
         if regime == 'bull':
             return 'bull'
         if regime == 'bear':
@@ -164,8 +169,8 @@ class StrategyOrchestrationStrategy(BaseStrategy):
                     }
                 else:
                     strategy_meta[strategy_name] = {}
-            except Exception as exc:
-                self.logger.warning(f"Sub-strategy {strategy_name} failed on {date}: {exc}")
+            except (KeyError, IndexError, ValueError) as exc:
+                self.logger.warning("Sub-strategy %s failed on %s: %s", strategy_name, date, exc)
                 strategy_signals[strategy_name] = {}
                 strategy_meta[strategy_name] = {}
 
@@ -242,5 +247,25 @@ class StrategyOrchestrationStrategy(BaseStrategy):
             }
 
         self._last_signal_meta = signal_meta
+        allocations_by_strategy: Dict[str, Dict[str, float]] = {}
+        for strategy_name, strat_weight in strategy_weights.items():
+            if strat_weight <= 0:
+                continue
+            ticker_allocations: Dict[str, float] = {}
+            for ticker, signal_weight in strategy_signals.get(strategy_name, {}).items():
+                w = float(strat_weight) * float(signal_weight)
+                if w > 0:
+                    ticker_allocations[str(ticker)] = w
+            if ticker_allocations:
+                allocations_by_strategy[strategy_name] = ticker_allocations
+        self._attribution_history.append(
+            {
+                'date': pd.Timestamp(date),
+                'strategy_allocations': allocations_by_strategy,
+            }
+        )
         self.last_strategy_weights = dict(strategy_weights)
         return self.validate_signals(combined)
+
+    def get_attribution_history(self) -> list[Dict[str, Any]]:
+        return list(self._attribution_history)

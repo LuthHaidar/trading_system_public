@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict
 from strategies.base_strategy import BaseStrategy
+from utils.types import TickerData, WeightMap
+
+_WARMUP_BUFFER = 10
 
 
 class MomentumStrategy(BaseStrategy):
@@ -55,10 +58,10 @@ class MomentumStrategy(BaseStrategy):
     
     def get_required_history(self) -> int:
         """Need lookback + skip_recent days of data"""
-        return self.lookback + self.skip_recent + 10
+        return self.lookback + self.skip_recent + _WARMUP_BUFFER
     
-    def generate_signals(self, date: pd.Timestamp, data: Dict[str, pd.DataFrame],
-                        current_positions: Dict[str, float]) -> Dict[str, float]:
+    def generate_signals(self, date: pd.Timestamp, data: TickerData,
+                        current_positions: WeightMap) -> WeightMap:
         """
         Generate momentum signals
         
@@ -73,7 +76,7 @@ class MomentumStrategy(BaseStrategy):
 
         # Validate inputs
         if not data:
-            self.logger.warning(f"No data available on {date}")
+            self.logger.warning("No data available on %s", date)
             return current_positions if current_positions else {}
         
         # Check if we need to rebalance based on time
@@ -89,14 +92,19 @@ class MomentumStrategy(BaseStrategy):
             try:
                 # Validate data availability
                 if len(df) < min_required_length:
-                    self.logger.debug(f"Insufficient data for {ticker}: {len(df)} < {min_required_length}")
+                    self.logger.debug(
+                        "Insufficient data for %s: %d < %d",
+                        ticker,
+                        len(df),
+                        min_required_length,
+                    )
                     continue
                 
                 # Get prices up to current date
                 prices = df.loc[:date, 'Close']
                 
                 if len(prices) < min_required_length:
-                    self.logger.debug(f"Insufficient price history for {ticker} up to {date}")
+                    self.logger.debug("Insufficient price history for %s up to %s", ticker, date)
                     continue
                 
                 # Calculate momentum
@@ -106,13 +114,13 @@ class MomentumStrategy(BaseStrategy):
                 if not np.isnan(momentum) and momentum >= self.min_momentum:
                     momentum_scores[ticker] = momentum
                     
-            except Exception as e:
-                self.logger.warning(f"Error calculating momentum for {ticker}: {e}")
+            except (KeyError, IndexError, ValueError) as e:
+                self.logger.warning("Error calculating momentum for %s: %s", ticker, e)
                 continue
         
         # Handle no valid momentum scores
         if not momentum_scores:
-            self.logger.warning(f"No valid momentum scores on {date}")
+            self.logger.warning("No valid momentum scores on %s", date)
             # Keep existing positions if we have them
             if current_positions:
                 self._last_signal_meta = {}
@@ -123,7 +131,11 @@ class MomentumStrategy(BaseStrategy):
         sorted_tickers = sorted(momentum_scores.items(), key=lambda x: x[1], reverse=True)
         top_tickers = sorted_tickers[:self.n_positions]
         
-        self.logger.info(f"{date.date()}: Top momentum - {[f'{t}({m:.2%})' for t, m in top_tickers]}")
+        self.logger.info(
+            "%s: Top momentum - %s",
+            date.date(),
+            [f'{t}({m:.2%})' for t, m in top_tickers],
+        )
         
         # Assign weights
         if self.weight_method == 'equal':
@@ -160,7 +172,7 @@ class MomentumStrategy(BaseStrategy):
         
         # Check if positions changed significantly enough to warrant rebalance
         if not self._positions_changed(current_positions, new_weights):
-            self.logger.debug(f"{date.date()}: Positions unchanged, skipping rebalance")
+            self.logger.debug("%s: Positions unchanged, skipping rebalance", date.date())
             self._last_signal_meta = {}
             return current_positions
         
@@ -178,7 +190,7 @@ class MomentumStrategy(BaseStrategy):
         days_since = (date - self.last_rebalance).days
         return days_since >= self.rebalance_frequency
     
-    def _positions_changed(self, current: Dict[str, float], new: Dict[str, float]) -> bool:
+    def _positions_changed(self, current: WeightMap, new: WeightMap) -> bool:
         """
         Check if positions changed significantly
         Returns True if positions are different enough to warrant rebalancing
@@ -201,7 +213,7 @@ class MomentumStrategy(BaseStrategy):
         
         return False
     
-    def _equal_weight(self, ranked_tickers: list) -> Dict[str, float]:
+    def _equal_weight(self, ranked_tickers: list) -> WeightMap:
         """Assign equal weight to each position"""
         if not ranked_tickers:
             return {}
@@ -209,7 +221,7 @@ class MomentumStrategy(BaseStrategy):
         weight = 1.0 / len(ranked_tickers)
         return {ticker: weight for ticker, _ in ranked_tickers}
     
-    def _proportional_weight(self, ranked_tickers: list) -> Dict[str, float]:
+    def _proportional_weight(self, ranked_tickers: list) -> WeightMap:
         """
         Assign weights proportional to momentum
         Higher momentum gets higher weight
@@ -265,10 +277,10 @@ class DualMomentumStrategy(BaseStrategy):
         self.cash_ticker = self.get_config_param('cash_ticker', 'SHY')
     
     def get_required_history(self) -> int:
-        return self.lookback + 10
+        return self.lookback + _WARMUP_BUFFER
     
-    def generate_signals(self, date: pd.Timestamp, data: Dict[str, pd.DataFrame],
-                        current_positions: Dict[str, float]) -> Dict[str, float]:
+    def generate_signals(self, date: pd.Timestamp, data: TickerData,
+                        current_positions: WeightMap) -> WeightMap:
         """Generate dual momentum signals"""
         self._last_signal_meta = {}
         momentum_scores = {}
@@ -285,13 +297,13 @@ class DualMomentumStrategy(BaseStrategy):
                 if momentum >= self.abs_threshold:
                     momentum_scores[ticker] = momentum
                     
-            except Exception as e:
-                self.logger.warning(f"Could not calculate momentum for {ticker}: {e}")
+            except (KeyError, IndexError, ValueError) as e:
+                self.logger.warning("Could not calculate momentum for %s: %s", ticker, e)
                 continue
         
         # If no assets pass absolute momentum test, go to cash
         if not momentum_scores:
-            self.logger.info(f"{date.date()}: No assets with positive momentum, moving to cash")
+            self.logger.info("%s: No assets with positive momentum, moving to cash", date.date())
             if self.cash_ticker in data:
                 self._last_signal_meta = {
                     self.cash_ticker: {
@@ -308,7 +320,11 @@ class DualMomentumStrategy(BaseStrategy):
         sorted_tickers = sorted(momentum_scores.items(), key=lambda x: x[1], reverse=True)
         top_tickers = sorted_tickers[:self.n_positions]
         
-        self.logger.info(f"{date.date()}: Top dual momentum: {[f'{t}({m:.2%})' for t, m in top_tickers]}")
+        self.logger.info(
+            "%s: Top dual momentum: %s",
+            date.date(),
+            [f'{t}({m:.2%})' for t, m in top_tickers],
+        )
         
         # Equal weight
         weight = 1.0 / len(top_tickers)

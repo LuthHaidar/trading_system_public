@@ -59,17 +59,14 @@ class Portfolio:
     """
     
     def __init__(self, initial_capital: float, base_currency: str = 'SGD',
-                 max_stale_price_days: int = 5, strict_stale_price: bool = False,
-                 on_stale_price: Optional[str] = None):
+                 max_stale_price_days: int = 5):
         """
         Initialize portfolio
         
         Args:
             initial_capital: Starting capital in base currency
             base_currency: Portfolio base currency (default: SGD)
-            max_stale_price_days: Max consecutive valuation days that can reuse last known price
-            strict_stale_price: Legacy option; maps to on_stale_price="halt" when True
-            on_stale_price: "force_close" to liquidate stale positions, "halt" to raise
+            max_stale_price_days: Max consecutive valuation sessions that can reuse last known price
         """
         self.initial_capital = initial_capital
         self.base_currency = base_currency
@@ -93,24 +90,27 @@ class Portfolio:
         self.fx_converter = CurrencyConverter(base_currency)
 
         self.max_stale_price_days = int(max_stale_price_days)
-        self.strict_stale_price = bool(strict_stale_price)
-        requested_policy = (on_stale_price or 'force_close').lower()
-        if requested_policy not in {'force_close', 'halt'}:
-            raise ValueError(f"Unsupported on_stale_price policy: {on_stale_price}")
-
-        # Legacy compatibility: strict_stale_price must always hard-halt.
-        if self.strict_stale_price and requested_policy != 'halt':
-            logger.warning(
-                "strict_stale_price=True overrides on_stale_price=%s to halt for compatibility",
-                requested_policy,
-            )
-        self.on_stale_price = 'halt' if self.strict_stale_price else requested_policy
-
         # Last known prices for stale-gap fallback
         self._last_prices: Dict[str, float] = {}
         self._last_price_dates: Dict[str, pd.Timestamp] = {}
+        self._last_price_sessions: Dict[str, int] = {}
+        self._valuation_sessions: Dict[pd.Timestamp, int] = {}
+        self._next_valuation_session = 0
         
-        logger.info(f"Portfolio initialized: {initial_capital} {base_currency}")
+        logger.info("Portfolio initialized: %s %s", initial_capital, base_currency)
+
+    def _get_valuation_session(self, valuation_date: Optional[pd.Timestamp]) -> Optional[int]:
+        """Map each valuation date to a stable session counter."""
+        if valuation_date is None:
+            return None
+
+        valuation_date = pd.Timestamp(valuation_date).tz_localize(None).normalize()
+        session = self._valuation_sessions.get(valuation_date)
+        if session is None:
+            self._next_valuation_session += 1
+            session = self._next_valuation_session
+            self._valuation_sessions[valuation_date] = session
+        return session
     
     def get_position_shares(self, ticker: str) -> float:
         """Get number of shares for a ticker"""
@@ -153,62 +153,37 @@ class Portfolio:
     
     def _resolve_effective_price(self, ticker: str, prices: Dict[str, float], valuation_date: Optional[pd.Timestamp]) -> Optional[float]:
         """Resolve valuation price using spot or stale fallback rules."""
+        valuation_session = self._get_valuation_session(valuation_date)
         effective_price = prices.get(ticker)
         if effective_price is not None:
             self._last_prices[ticker] = float(effective_price)
             if valuation_date is not None:
                 self._last_price_dates[ticker] = valuation_date
+            if valuation_session is not None:
+                self._last_price_sessions[ticker] = valuation_session
             return float(effective_price)
 
         last_price = self._last_prices.get(ticker)
         last_price_date = self._last_price_dates.get(ticker)
-        if last_price is None or valuation_date is None or last_price_date is None:
+        last_price_session = self._last_price_sessions.get(ticker)
+        if last_price is None or valuation_date is None or last_price_date is None or valuation_session is None or last_price_session is None:
             msg = f"Missing valuation price for held ticker {ticker} and no historical fallback available"
             logger.error(msg)
-            if self.on_stale_price == 'halt' or self.strict_stale_price:
-                raise DataStalenessError(msg)
-            return None
+            raise DataStalenessError(msg)
 
-        stale_days = int((valuation_date - last_price_date).days)
-        if stale_days > self.max_stale_price_days:
+        stale_sessions = int(valuation_session - last_price_session)
+        if stale_sessions > self.max_stale_price_days:
             msg = (
                 f"Stale valuation price for {ticker}: last seen {last_price_date.date()} "
-                f"({stale_days} days stale, max={self.max_stale_price_days})"
+                f"({stale_sessions} stale valuation session(s), max={self.max_stale_price_days})"
             )
             logger.error(msg)
-            if self.on_stale_price == 'halt' or self.strict_stale_price:
-                raise DataStalenessError(msg)
-
-            current_shares = float(self.positions.get(ticker, 0.0))
-            if current_shares > 0:
-                currency = self.position_currencies.get(ticker, self.base_currency)
-                trade_date = valuation_date.to_pydatetime() if valuation_date is not None else datetime.now()
-                force_trade = Trade(
-                    date=trade_date,
-                    ticker=ticker,
-                    action='SELL',
-                    shares=current_shares,
-                    price=float(last_price),
-                    commission=0.0,
-                    slippage=0.0,
-                    fx_cost=0.0,
-                    value=float(current_shares * float(last_price)),
-                    currency=currency,
-                    decision_reason='FORCE_CLOSE_STALE_DATA',
-                )
-                if self.execute_trade(force_trade):
-                    logger.warning(
-                        "Force-closed %s due to stale pricing at %.4f (%d stale day(s))",
-                        ticker,
-                        float(last_price),
-                        stale_days,
-                    )
-            return None
+            raise DataStalenessError(msg)
 
         logger.warning(
-            "Using stale fallback price for %s (%d stale day(s)); last date=%s",
+            "Using stale fallback price for %s (%d stale valuation session(s)); last date=%s",
             ticker,
-            stale_days,
+            stale_sessions,
             last_price_date.date(),
         )
         return float(last_price)
@@ -267,7 +242,12 @@ class Portfolio:
             # Check sufficient cash
             total_cost = trade_value_base + cost_base + trade.fx_cost
             if total_cost > self.cash:
-                logger.warning(f"Insufficient cash for {trade.ticker}: need {total_cost:.2f}, have {self.cash:.2f}")
+                logger.warning(
+                    "Insufficient cash for %s: need %.2f, have %.2f",
+                    trade.ticker,
+                    total_cost,
+                    self.cash,
+                )
                 return False
             
             # Update cash
@@ -277,14 +257,26 @@ class Portfolio:
             self.positions[trade.ticker] = self.positions.get(trade.ticker, 0) + trade.shares
             self.position_currencies[trade.ticker] = trade.currency
             
-            logger.info(f"BUY {trade.shares:.2f} {trade.ticker} @ {trade.price:.2f} {trade.currency} "
-                       f"(cost: {total_cost:.2f} {self.base_currency})")
+            logger.info(
+                "BUY %.2f %s @ %.2f %s (cost: %.2f %s)",
+                trade.shares,
+                trade.ticker,
+                trade.price,
+                trade.currency,
+                total_cost,
+                self.base_currency,
+            )
             
         else:  # SELL
             # Check sufficient shares
             current_shares = self.positions.get(trade.ticker, 0)
             if trade.shares > current_shares + 0.001:  # Allow small floating point error
-                logger.warning(f"Insufficient shares for {trade.ticker}: need {trade.shares}, have {current_shares}")
+                logger.warning(
+                    "Insufficient shares for %s: need %s, have %s",
+                    trade.ticker,
+                    trade.shares,
+                    current_shares,
+                )
                 return False
             
             # Update cash
@@ -300,8 +292,15 @@ class Portfolio:
             else:
                 self.positions[trade.ticker] = new_shares
             
-            logger.info(f"SELL {trade.shares:.2f} {trade.ticker} @ {trade.price:.2f} {trade.currency} "
-                       f"(proceeds: {net_proceeds:.2f} {self.base_currency})")
+            logger.info(
+                "SELL %.2f %s @ %.2f %s (proceeds: %.2f %s)",
+                trade.shares,
+                trade.ticker,
+                trade.price,
+                trade.currency,
+                net_proceeds,
+                self.base_currency,
+            )
         
         # Record trade
         self.trades.append(trade)

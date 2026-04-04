@@ -34,14 +34,14 @@ class AdvancedRiskAnalytics:
                             bear_scale: float = 0.5,
                             high_vol_scale: float = 0.7,
                             vol_threshold: float = 0.25,
-                            bear_return_threshold: float = 0.0) -> Dict[str, float]:
-        """Deprecated heuristic regime scaler; prefer hmm_regime_scaler when available."""
+                            bear_return_threshold: float = 0.0) -> Dict[str, str | float]:
+        """Fallback heuristic regime scaler; returns one of {'bull','neutral','bear'}."""
         if len(market_returns) < 20:
-            return {'regime': 'unknown', 'scale': 1.0}
+            return {'regime': 'neutral', 'scale': 1.0}
         trend = market_returns.tail(60).mean()
         vol = market_returns.tail(20).std() * np.sqrt(252)
         if vol > vol_threshold:
-            return {'regime': 'high_vol', 'scale': high_vol_scale}
+            return {'regime': 'bear', 'scale': high_vol_scale}
         if trend < bear_return_threshold:
             return {'regime': 'bear', 'scale': bear_scale}
         return {'regime': 'bull', 'scale': bull_scale}
@@ -51,7 +51,7 @@ class AdvancedRiskAnalytics:
                           detector,
                           bull_scale: float = 1.0,
                           bear_scale: float = 0.5,
-                          high_vol_scale: float = 0.7) -> Dict[str, float]:
+                          high_vol_scale: float = 0.7) -> Dict[str, str | float]:
         """HMM-driven regime scaler returning a consistent {'regime', 'scale'} payload."""
         regime = detector.predict(market_returns)
         if regime == 'bull':

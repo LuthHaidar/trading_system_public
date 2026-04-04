@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from backtesting.engine import run_backtest_from_config
+from backtesting.trade_accounting import FIFOTradeMatcher
 from backtesting.tuner import build_strategy_overrides, rank_results
 from backtesting.validation import ValidationSuite
 from backtesting.walk_forward import run_walk_forward, plot_walk_forward
@@ -80,15 +81,70 @@ def compute_monte_carlo_summary(
     horizon_days: int = 252,
     block_size: int = 5,
     random_state: int = 42,
+    mc_mode: str = 'trade_shuffle',
 ):
-    """Compute block-bootstrap Monte Carlo summary, retaining simulated paths and path stats."""
+    """Compute Monte Carlo summary, preferring trade bootstrap when available."""
     equity_curve = results.get('equity_curve')
+    trades = results.get('trades') or []
+    portfolio = results.get('portfolio')
+    trade_input = trades
+    if trades and portfolio is not None:
+        try:
+            matcher = FIFOTradeMatcher(getattr(portfolio, 'base_currency', 'USD'))
+            matched = matcher.match_trades(trades, getattr(portfolio, 'fx_converter'))
+            if matched:
+                matched_trade_returns = []
+                for m in matched:
+                    entry_notional = float(m.entry_price) * float(m.shares)
+                    if entry_notional <= 0:
+                        continue
+                    matched_trade_returns.append(
+                        {
+                            'date': m.exit_date,
+                            'return': float(m.realized_pnl_base) / entry_notional,
+                        }
+                    )
+                if matched_trade_returns:
+                    trade_input = matched_trade_returns
+        except (AttributeError, TypeError, ValueError):
+            trade_input = trades
+
+    mode = str(mc_mode or 'trade_shuffle').lower()
+    use_trade = mode in {'trade_shuffle', 'trade_resample'} and len(trade_input) > 0
+
+    if use_trade:
+        trade_mode = 'resample' if mode == 'trade_resample' else 'shuffle'
+        mc = ValidationSuite.monte_carlo_trade_simulation(
+            trades=trade_input,
+            n_sims=n_sims,
+            mode=trade_mode,
+            random_state=random_state,
+            return_paths=True,
+        )
+        paths = mc.get('paths')
+        if paths is not None and len(paths) > 0:
+            trade_count = int(mc.get('trade_count', 0))
+            summary = {
+                'available': True,
+                'method': 'trade',
+                'mode': trade_mode,
+                'label': f'Trade Bootstrap ({trade_mode})',
+                'n_sims': n_sims,
+                'horizon_days': trade_count,
+                'random_state': random_state,
+                'paths': paths,
+                'trade_count': trade_count,
+            }
+            summary.update({k: v for k, v in mc.items() if k not in {'paths', 'trade_count'}})
+            summary['path_stats'] = mc.get('path_stats') or ValidationSuite.monte_carlo_trade_path_stats(paths)
+            return summary
+
     if equity_curve is None or len(equity_curve) < 20:
-        return {'available': False, 'reason': 'insufficient_history'}
+        return {'available': False, 'reason': 'insufficient_history', 'method': 'return_block'}
 
     returns = equity_curve.pct_change().dropna()
     if len(returns) < 20:
-        return {'available': False, 'reason': 'insufficient_returns'}
+        return {'available': False, 'reason': 'insufficient_returns', 'method': 'return_block'}
 
     mc = ValidationSuite.monte_carlo_simulation(
         returns=returns,
@@ -101,6 +157,9 @@ def compute_monte_carlo_summary(
     paths = mc.get('paths')
     summary = {
         'available': True,
+        'method': 'return_block',
+        'mode': 'block',
+        'label': 'Return Bootstrap (block)',
         'n_sims': n_sims,
         'horizon_days': horizon_days,
         'block_size': block_size,
@@ -121,13 +180,17 @@ def print_monte_carlo_summary(results):
         return
 
     print("\n" + "=" * 70)
-    print("BOOTSTRAP RETURN DISTRIBUTION (block bootstrap, not overfitting test)")
+    print("BOOTSTRAP RETURN DISTRIBUTION")
     print("=" * 70)
+    print(f"Method: {mc.get('label', 'Return Bootstrap (block)')}")
     print(
         f"Simulations: {mc.get('n_sims', 0)}, "
-        f"Horizon: {mc.get('horizon_days', 0)} days, "
-        f"Block size: {mc.get('block_size', 0)}"
+        f"Horizon: {mc.get('horizon_days', 0)} days"
     )
+    if mc.get('method') == 'return_block':
+        print(f"Block size: {mc.get('block_size', 0)}")
+    if mc.get('method') == 'trade':
+        print(f"Trades sampled: {mc.get('trade_count', 0)}")
     print(f"  {'P05 1-year return (worst 5%):':<36} {_format_pct(mc.get('p05_return', 0.0)):>12}")
     print(f"  {'P50 1-year return (median):':<36} {_format_pct(mc.get('p50_return', 0.0)):>12}")
     print(f"  {'P95 1-year return (best 5%):':<36} {_format_pct(mc.get('p95_return', 0.0)):>12}")
@@ -153,7 +216,7 @@ def print_monte_carlo_summary(results):
         print(f"  {'Risk of ruin:':<36} {_format_pct(path_stats.get('p_ruin', 0.0)):>12}")
 
 
-def plot_monte_carlo(actual_equity, paths, output_path, path_stats=None):
+def plot_monte_carlo(actual_equity, paths, output_path, path_stats=None, method_label: str = 'Return Bootstrap (block)'):
     """Plot actual equity plus Monte Carlo forward paths."""
     if paths is None or len(paths) == 0:
         return
@@ -198,7 +261,7 @@ def plot_monte_carlo(actual_equity, paths, output_path, path_stats=None):
             bbox={'facecolor': 'white', 'alpha': 0.75, 'edgecolor': 'none'},
         )
 
-    ax.set_title(f"Monte Carlo — Block Bootstrap ({n_sims} simulations, {horizon_days}d horizon)")
+    ax.set_title(f"Monte Carlo — {method_label} ({n_sims} simulations, {horizon_days}d horizon)")
     ax.set_xlabel('Trading days relative to projection start')
     ax.set_ylabel('Equity')
     ax.grid(True, alpha=0.3)
@@ -317,6 +380,26 @@ def print_benchmark_summary(results):
 
 
 
+def print_asset_exclusions_summary(results):
+    """Print grouped asset exclusion counts when available."""
+    exclusions = results.get('asset_exclusions', []) or []
+    if not exclusions:
+        return
+
+    grouped = {}
+    for rec in exclusions:
+        reason = getattr(rec, 'reason', None)
+        if reason is None and isinstance(rec, dict):
+            reason = rec.get('reason')
+        reason = reason or 'unknown'
+        grouped[reason] = grouped.get(reason, 0) + 1
+
+    print("\nAsset Exclusions")
+    print("-" * 30)
+    for reason, count in sorted(grouped.items(), key=lambda x: x[0]):
+        print(f"{reason}: {count}")
+
+
 def print_regime_performance_summary(results):
     """Print regime-conditional performance table when available."""
     metrics = results.get('metrics', {}) or {}
@@ -337,6 +420,55 @@ def print_regime_performance_summary(results):
             f"{regime:<10}{int(row.get('days', 0)):>8}{_format_pct(row.get('fraction', 0.0)):>10}"
             f"{_format_pct(row.get('cagr', 0.0)):>12}{_format_pct(row.get('volatility', 0.0)):>12}"
             f"{_format_num(row.get('sharpe', 0.0)):>10}{_format_pct(row.get('max_drawdown', 0.0)):>12}"
+        )
+
+
+def print_per_ticker_regime_summary(results):
+    """Print per-ticker regime composition when available."""
+    regime_map = results.get('per_ticker_regime_series', {}) or {}
+    if not regime_map:
+        return
+
+    print("\n" + "=" * 70)
+    print("PER-TICKER REGIME SUMMARY")
+    print("=" * 70)
+    for ticker in sorted(regime_map.keys()):
+        series = regime_map.get(ticker)
+        if series is None or len(series) == 0:
+            continue
+        labels = pd.Series(series).dropna().astype(str)
+        if labels.empty:
+            continue
+        counts = labels.value_counts()
+        top_label = str(counts.index[0])
+        total = float(counts.sum())
+        bull_frac = float(counts.get('bull', 0) / total)
+        neutral_frac = float(counts.get('neutral', 0) / total)
+        bear_frac = float(counts.get('bear', 0) / total)
+        print(
+            f"{ticker}: dominant={top_label} "
+            f"(bull={bull_frac:.1%}, neutral={neutral_frac:.1%}, bear={bear_frac:.1%})"
+        )
+
+
+def print_attribution_summary(results):
+    """Print per-sub-strategy attribution metrics when present."""
+    attribution = results.get('attribution', {}) or {}
+    if not attribution:
+        return
+    print("\n" + "=" * 70)
+    print("STRATEGY ATTRIBUTION")
+    print("=" * 70)
+    print(f"{'Strategy':<24}{'Weight':>10}{'AnnRet':>10}{'Vol':>10}{'Sharpe':>10}{'MaxDD':>10}")
+    for name in sorted(attribution.keys()):
+        row = attribution.get(name, {}) or {}
+        print(
+            f"{name:<24}"
+            f"{_format_pct(row.get('weight_fraction', 0.0)):>10}"
+            f"{_format_pct(row.get('annualized_return', 0.0)):>10}"
+            f"{_format_pct(row.get('volatility', 0.0)):>10}"
+            f"{_format_num(row.get('sharpe_ratio', 0.0)):>10}"
+            f"{_format_pct(row.get('max_drawdown', 0.0)):>10}"
         )
 
 
@@ -608,6 +740,21 @@ def save_metrics(results, output_path='results/metrics.txt'):
         else:
             f.write("Unavailable\n")
 
+
+        exclusions = results.get('asset_exclusions', []) or []
+        if exclusions:
+            grouped = {}
+            for rec in exclusions:
+                reason = getattr(rec, 'reason', None)
+                if reason is None and isinstance(rec, dict):
+                    reason = rec.get('reason')
+                reason = reason or 'unknown'
+                grouped[reason] = grouped.get(reason, 0) + 1
+            f.write("\nAsset Exclusions\n")
+            f.write("-" * 30 + "\n")
+            for reason, count in sorted(grouped.items(), key=lambda x: x[0]):
+                f.write(f"{reason}: {count}\n")
+
         mc = results.get('monte_carlo_validation', {}) or {}
         f.write("\nBootstrap Return Distribution (block bootstrap, not overfitting test)\n")
         f.write("-" * 68 + "\n")
@@ -773,15 +920,20 @@ Examples:
     parser.add_argument('--no-save', action='store_true', help='Skip saving results to files')
     parser.add_argument('--mc-seed', type=int, default=42,
                         help='Random seed for Monte Carlo bootstrap (default: 42)')
+    parser.add_argument('--mc-mode', type=str, default='trade_shuffle',
+                        choices=['trade_shuffle', 'trade_resample', 'return_block'],
+                        help='Monte Carlo mode: trade_shuffle, trade_resample, or return_block')
     parser.add_argument('--no-mc-plot', action='store_true',
                         help='Skip Monte Carlo projection plot generation')
     parser.add_argument('--walk-forward', action='store_true',
-                        help='Run walk-forward analysis with fixed strategy config')
+                        help='Run walk-forward analysis (fixed config by default; optional per-fold sweep with --wf-sweep)')
     parser.add_argument('--wf-train-days', type=int, default=252, help='Walk-forward train window (days)')
     parser.add_argument('--wf-oos-days', type=int, default=63, help='Walk-forward out-of-sample window (days)')
     parser.add_argument('--wf-step-days', type=int, default=63, help='Walk-forward step size (days)')
     parser.add_argument('--wf-anchored', action='store_true',
                         help='Use anchored expanding train window for walk-forward')
+    parser.add_argument('--wf-sweep', action='append', default=[],
+                        help='Walk-forward per-fold sweep definition key=v1,v2 or key=start:end[:step]')
     parser.add_argument('--config-override', type=str, default=None, help='JSON object to override main config')
     parser.add_argument('--strategy-override', type=str, default=None, help='JSON object to override strategy config')
     parser.add_argument('--sweep', action='append', default=[],
@@ -802,6 +954,10 @@ Examples:
     start_ts = pd.Timestamp(args.start).tz_localize(None).normalize()
     if start_ts >= end_ts:
         print("ERROR: --start must precede --end")
+        sys.exit(1)
+
+    if args.sweep and args.wf_sweep:
+        print("ERROR: --sweep and --wf-sweep are mutually exclusive")
         sys.exit(1)
 
     try:
@@ -882,6 +1038,7 @@ Examples:
                 results['monte_carlo_validation'] = compute_monte_carlo_summary(
                     results,
                     random_state=args.mc_seed,
+                    mc_mode=args.mc_mode,
                 )
                 all_results.append(results)
 
@@ -907,7 +1064,7 @@ Examples:
                     f"override={row.get('strategy_override')}"
                 )
 
-            universe_metrics = {
+            universe_metrics = { # use sweep_index for display, but fall back to run_id if not available
                 str(row.get('sweep_index', row.get('run_id'))): row.get('metrics', {})
                 for row in all_results
             }
@@ -1037,13 +1194,17 @@ Examples:
             results['monte_carlo_validation'] = compute_monte_carlo_summary(
                 results,
                 random_state=args.mc_seed,
+                mc_mode=args.mc_mode,
             )
             print(f"Run ID: {results.get('run_id', 'N/A')}")
 
             print_degradation_summary(results)
             print_monte_carlo_summary(results)
             print_regime_performance_summary(results)
+            print_per_ticker_regime_summary(results)
+            print_attribution_summary(results)
             print_benchmark_summary(results)
+            print_asset_exclusions_summary(results)
             mc = results.get('monte_carlo_validation', {}) or {}
             mc_paths = mc.get('paths')
             mc_path_stats = mc.get('path_stats', {}) or {}
@@ -1097,6 +1258,7 @@ Examples:
                         paths=mc_paths,
                         output_path=f'{args.output_dir}/monte_carlo_plot.png',
                         path_stats=mc_path_stats,
+                        method_label=str(mc.get('label', 'Return Bootstrap (block)')),
                     )
                 except Exception as e:
                     print(f"Warning: Could not create Monte Carlo plot: {e}")
@@ -1115,6 +1277,8 @@ Examples:
                         anchored=args.wf_anchored,
                         config_override=config_override,
                         strategy_override=strategy_override,
+                        sweep_definitions=args.wf_sweep or None,
+                        optimize_metric=args.optimize_metric,
                     )
                     agg = wf.get('aggregate_oos_metrics', {})
                     print("\nWalk-forward aggregate OOS metrics:")
@@ -1124,6 +1288,13 @@ Examples:
                         f"  Positive OOS Sharpe fraction: "
                         f"{agg.get('positive_oos_sharpe_fraction', 0.0):.2%}"
                     )
+                    if args.wf_sweep:
+                        print(f"  Parameter stability: {wf.get('parameter_stability', 0.0):.2%}")
+                        by_key = wf.get('parameter_stability_by_key', {}) or {}
+                        if by_key:
+                            print("  Parameter stability by key:")
+                            for key in sorted(by_key.keys()):
+                                print(f"    - {key}: {by_key[key]:.2%}")
 
                     if not args.no_plot:
                         os.makedirs(args.output_dir, exist_ok=True)
@@ -1132,6 +1303,7 @@ Examples:
                             oos_equity=wf.get('oos_equity_curve'),
                             split_boundaries=wf.get('split_boundaries', []),
                             output_path=f"{args.output_dir}/walk_forward_plot.png",
+                            fold_annotations=wf.get('split_results'),
                         )
                         print(f"Walk-forward plot saved to: {args.output_dir}/walk_forward_plot.png")
                 except Exception as e:

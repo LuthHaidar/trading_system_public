@@ -32,7 +32,7 @@ class PositionSizerRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(weights['A'], 0.30, places=6)
         self.assertAlmostEqual(weights['B'], 0.30, places=6)
 
-    def test_inverse_volatility_method_matches_legacy_risk_parity_alias(self):
+    def test_unknown_position_sizing_method_falls_back_to_equal_weight(self):
         idx = pd.date_range('2024-01-01', periods=80, freq='D')
         # A has smoother path (lower vol), B has bumpier path (higher vol).
         close_a = pd.Series([100.0 + i * 0.2 for i in range(len(idx))], index=idx)
@@ -46,14 +46,10 @@ class PositionSizerRegressionTests(unittest.TestCase):
         }
         signals = {'A': 1.0, 'B': 1.0}
 
-        rp = PositionSizer(method='risk_parity', config={'volatility_window': 60})
-        inv = PositionSizer(method='inverse_volatility', config={'volatility_window': 60})
-
-        rp_weights = rp.size_positions(signals, data, current_equity=1000.0)
-        inv_weights = inv.size_positions(signals, data, current_equity=1000.0)
-
-        self.assertAlmostEqual(rp_weights['A'], inv_weights['A'], places=8)
-        self.assertAlmostEqual(rp_weights['B'], inv_weights['B'], places=8)
+        unknown = PositionSizer(method='unknown_method', config={'volatility_window': 60})
+        weights = unknown.size_positions(signals, data, current_equity=1000.0)
+        self.assertAlmostEqual(weights['A'], 0.5, places=8)
+        self.assertAlmostEqual(weights['B'], 0.5, places=8)
 
 
 if __name__ == '__main__':

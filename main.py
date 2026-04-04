@@ -25,6 +25,7 @@ from strategies import create_strategy, get_available_strategies
 from data.data_manager import DataManager
 from risk.position_sizer import PositionSizer, RiskConstraints
 from risk.optimizer import PortfolioOptimizer
+import logging
 from utils.logger import setup_logger, get_logger
 from utils.config_schema import validate_main_config, validate_strategies_config
 from backtesting.engine import run_backtest_from_config
@@ -139,10 +140,7 @@ class LiveTradingEngine:
         # Trading schedule
         execution_cfg = self.config.get('execution', {})
 
-        # ``timing`` is canonical for execution semantics (e.g. open/close in
-        # backtests). Live scheduling still needs an HH:MM clock time.
         raw_timing = str(execution_cfg.get('timing', '')).strip().lower()
-        legacy_time = str(execution_cfg.get('time', '16:00')).strip()
         if raw_timing in {'open', 'market_open'}:
             self.execution_time = '09:30'
         elif raw_timing in {'close', 'market_close'}:
@@ -150,14 +148,11 @@ class LiveTradingEngine:
         elif raw_timing and len(raw_timing) == 5 and raw_timing[2] == ':':
             self.execution_time = raw_timing
         else:
-            self.execution_time = legacy_time
-            if raw_timing:
-                logger.warning(
-                    "Unsupported execution.timing value '%s' for live scheduling; "
-                    "falling back to execution.time=%s",
-                    raw_timing,
-                    legacy_time,
-                )
+            self.execution_time = '09:30'
+            logger.warning(
+                "Unsupported execution.timing value '%s' for live scheduling. Defaulting to 09:30. Supported values are 'open', 'close', or HH:MM format.",
+                raw_timing
+            )
 
         self.hold_weight_epsilon = float(execution_cfg.get('hold_weight_epsilon', 1e-4))
         
@@ -184,10 +179,10 @@ class LiveTradingEngine:
             self.audit_store = AuditStore(data_platform_cfg.get('sqlite_path', 'state/trading_audit.db'))
             self.metrics_store = create_metrics_store(data_platform_cfg.get('metrics_store', {}))
 
-        logger.info(f"Live Trading Engine initialized")
-        logger.info(f"Strategy: {strategy.name}")
-        logger.info(f"Position sizing: {sizing_method}")
-        logger.info(f"Execution time: {self.execution_time}")
+        logger.info("Live Trading Engine initialized")
+        logger.info("Strategy: %s", strategy.name)
+        logger.info("Position sizing: %s", sizing_method)
+        logger.info("Execution time: %s", self.execution_time)
         if dry_run:
             logger.warning("DRY RUN MODE - No orders will be executed")
     
@@ -222,11 +217,11 @@ class LiveTradingEngine:
     
     def update_data(self, tickers: list) -> None:
         """Update market data for tickers"""
-        logger.info(f"Updating market data for {len(tickers)} tickers...")
+        logger.info("Updating market data for %s tickers...", len(tickers))
         results = self.data_manager.update_all(tickers)
         
         success_count = sum(1 for success in results.values() if success)
-        logger.info(f"Updated {success_count}/{len(tickers)} tickers successfully")
+        logger.info("Updated %s/%s tickers successfully", success_count, len(tickers))
 
     def _validate_data_freshness(self, data: Dict[str, pd.DataFrame], tickers: list) -> None:
         """
@@ -393,8 +388,8 @@ class LiveTradingEngine:
             tickers: List of tickers in universe
         """
         logger.info("="*70)
-        logger.info(f"EXECUTING STRATEGY: {self.strategy.name}")
-        logger.info(f"Time: {datetime.now()}")
+        logger.info("EXECUTING STRATEGY: %s", self.strategy.name)
+        logger.info("Time: %s", datetime.now())
         logger.info("="*70)
         
         try:
@@ -419,7 +414,7 @@ class LiveTradingEngine:
             current_shares = {ticker: int(pos['shares']) 
                             for ticker, pos in ibkr_positions.items()}
             
-            logger.info(f"Current positions: {current_shares}")
+            logger.info("Current positions: %s", current_shares)
             if self.audit_store:
                 self.audit_store.log_event(
                     event_type='positions_snapshot',
@@ -434,7 +429,7 @@ class LiveTradingEngine:
                 logger.error("Could not get market prices")
                 return
             
-            logger.info(f"Current prices: {current_prices}")
+            logger.info("Current prices: %s", current_prices)
             self.live_risk_manager.mark_data_heartbeat(datetime.now())
 
             forced_exits = self._evaluate_position_level_stops(
@@ -454,12 +449,12 @@ class LiveTradingEngine:
             # Calculate current equity
             account_summary = self.ibkr.get_account_summary()
             equity = account_summary.get('net_liquidation', 0)
-            
-            logger.info(f"Account equity: {equity:,.2f} {account_summary.get('currency', 'USD')}")
+            if logger.isEnabledFor(logging.INFO): # Avoid string formatting if log level is higher than INFO
+                logger.info(f"Account equity: {equity:,.2f} {account_summary.get('currency', 'USD')}")
 
             risk_event = self.live_risk_manager.evaluate(equity, datetime.now())
             if risk_event.triggered:
-                logger.error(f"Circuit breaker triggered: {risk_event.reason} metadata={risk_event.metadata}")
+                logger.error("Circuit breaker triggered: %s metadata=%s", risk_event.reason, risk_event.metadata)
                 if self.audit_store:
                     self.audit_store.log_event(
                         event_type='circuit_breaker_triggered',
@@ -504,7 +499,7 @@ class LiveTradingEngine:
             current_weights = {ticker: value / equity 
                              for ticker, value in position_values.items()}
             
-            logger.info(f"Current weights: {current_weights}")
+            logger.info("Current weights: %s", current_weights)
             
             # Generate signals from strategy
             logger.info("Generating strategy signals...")
@@ -516,7 +511,7 @@ class LiveTradingEngine:
                 current_weights
             )
             
-            logger.info(f"Strategy signals: {target_weights}")
+            logger.info("Strategy signals: %s", target_weights)
             
             if not target_weights:
                 if not forced_exits:
@@ -543,7 +538,7 @@ class LiveTradingEngine:
                     equity
                 )
                 
-                logger.info(f"Sized weights: {target_weights}")
+                logger.info("Sized weights: %s", target_weights)
                 
                 # Portfolio optimization (optional): run before final constraints.
                 if self.use_optimizer and self.optimizer and target_weights:
@@ -555,9 +550,9 @@ class LiveTradingEngine:
                             data,
                             method=optimizer_method
                         )
-                        logger.info(f"Optimized weights: {target_weights}")
+                        logger.info("Optimized weights: %s", target_weights)
                     except Exception as e:
-                        logger.error(f"Optimization failed: {e}")
+                        logger.error("Optimization failed: %s", e)
                         halt_on_failure = bool(
                             self.config.get('live_risk', {}).get('halt_on_optimization_failure', True)
                         )
@@ -589,7 +584,7 @@ class LiveTradingEngine:
                         data,
                         max_total_exposure=max(0.0, 1.0 - float(self.risk_constraints.min_cash_reserve)),
                     )
-                logger.info(f"Constrained weights: {target_weights}")
+                logger.info("Constrained weights: %s", target_weights)
             
             # Calculate target positions in shares
             logger.info("Calculating target positions...")
@@ -628,7 +623,7 @@ class LiveTradingEngine:
                     logger.warning("Forcing exit for %s due to %s", ticker, forced_exits[ticker].get('reason'))
                     target_positions.pop(ticker, None)
             
-            logger.info(f"Target positions: {target_positions}")
+            logger.info("Target positions: %s", target_positions)
             
             # Calculate orders needed
             orders = self.ibkr.reconcile_positions(target_positions)
@@ -637,9 +632,9 @@ class LiveTradingEngine:
                 logger.info("No rebalancing needed")
                 return
             
-            logger.info(f"Orders to execute: {len(orders)}")
+            logger.info("Orders to execute: %d", len(orders))
             for ticker, quantity, action in orders:
-                logger.info(f"  {action} {quantity} {ticker}")
+                logger.info("  %s %d shares of %s", action.upper(), quantity, ticker)
 
             if self.audit_store:
                 self.audit_store.log_event(
@@ -651,7 +646,7 @@ class LiveTradingEngine:
 
             drift = self.drift_monitor.check(target_positions, ibkr_positions)
             if drift:
-                logger.warning(f"Position drift detected before execution: {drift}")
+                logger.warning("Position drift detected before execution: %s", drift)
             # Execute orders (unless dry run)
             if self.dry_run:
                 logger.warning("DRY RUN - Orders not executed")
@@ -697,7 +692,7 @@ class LiveTradingEngine:
                 'position_high_water': dict(self._position_high_water),
             }
             backup_path = self.backup_manager.backup(backup_payload)
-            logger.info(f"State backup created: {backup_path}")
+            logger.info("State backup created: %s", backup_path)
 
             if self.audit_store:
                 self.audit_store.save_state_snapshot(
@@ -717,7 +712,7 @@ class LiveTradingEngine:
             self._persist_runtime_state(extra={'execution_complete': True})
             
         except Exception as e:
-            logger.error(f"Error executing strategy: {e}")
+            logger.error("Error executing strategy: %s", e)
             import traceback
             traceback.print_exc()
 
@@ -823,7 +818,7 @@ class LiveTradingEngine:
             logger.info('No persisted live state snapshot available for recovery')
             return
 
-        logger.info(f"Recovered persisted snapshot timestamp={snapshot.get('timestamp')}")
+        logger.info("Recovered persisted snapshot timestamp=%s", snapshot.get('timestamp'))
         risk_state = snapshot.get('risk_state', {}) or {}
         if risk_state:
             try:
@@ -863,7 +858,7 @@ class LiveTradingEngine:
             current_positions = self.ibkr.get_positions()
             drift = self.drift_monitor.check(previous_targets, current_positions)
             if drift:
-                logger.warning(f"Recovered-state drift detected: {drift}")
+                logger.warning("Recovered-state drift detected: %s", drift)
                 self.audit_store.log_event(
                     event_type='recovery_drift_detected',
                     source='live',
@@ -908,8 +903,8 @@ class LiveTradingEngine:
     
     def run_scheduled(self, tickers: list) -> None:
         """Run on schedule (daily at specified time)"""
-        logger.info(f"Scheduling daily execution at {self.execution_time}")
-        
+        logger.info("Scheduling daily execution at %s", self.execution_time)
+
         # Schedule daily execution
         schedule.every().day.at(self.execution_time).do(
             self.run_once, tickers=tickers
@@ -939,7 +934,7 @@ class LiveTradingEngine:
                 try:
                     schedule.run_pending()
                 except Exception as e:
-                    logger.error(f"Scheduler health check failure: {e}; attempting automatic restart")
+                    logger.error("Scheduler health check failure: %s; attempting automatic restart", e)
                     time.sleep(5)
                 time.sleep(60)  # Check every minute
 
@@ -1188,7 +1183,7 @@ def main():
         logger.info("Stopped by user")
         return 0
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error("Fatal error: %s", e)
         import traceback
         traceback.print_exc()
         return 1

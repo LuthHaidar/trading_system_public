@@ -122,5 +122,45 @@ class OptimizerRegressionTests(unittest.TestCase):
         self.assertFalse(np.isnan(cov.values).any())
 
 
+    def test_covariance_exponential_is_positive_semidefinite(self):
+        optimizer = PortfolioOptimizer(
+            {
+                'covariance_estimator': 'exponential',
+                'covariance_ew_halflife': 20,
+                'covariance_jitter': 0.0,
+            }
+        )
+        rng = np.random.default_rng(7)
+        returns_df = pd.DataFrame(rng.normal(0.0, 0.01, size=(300, 4)), columns=list('ABCD'))
+        cov = optimizer._estimate_covariance(returns_df)
+        eigvals = np.linalg.eigvalsh(cov.values)
+        self.assertTrue(np.all(eigvals >= -1e-10))
+
+    def test_covariance_exponential_recent_bias(self):
+        n = 300
+        low_var = np.full(n // 2, 0.001)
+        high_var = np.array([0.001, -0.001] * (n // 4))
+        series = np.concatenate([low_var, high_var])
+        returns_df = pd.DataFrame({'A': series, 'B': series * 0.5})
+
+        sample = PortfolioOptimizer({'covariance_estimator': 'sample', 'covariance_jitter': 0.0})._estimate_covariance(returns_df)
+        ew = PortfolioOptimizer(
+            {'covariance_estimator': 'exponential', 'covariance_ew_halflife': 20, 'covariance_jitter': 0.0}
+        )._estimate_covariance(returns_df)
+        self.assertGreater(float(ew.loc['A', 'A']), float(sample.loc['A', 'A']))
+
+    def test_covariance_exponential_shrinkage_full_shrink(self):
+        optimizer = PortfolioOptimizer(
+            {
+                'covariance_estimator': 'exponential_shrinkage',
+                'covariance_shrinkage': 1.0,
+                'covariance_jitter': 0.0,
+            }
+        )
+        returns_df = pd.DataFrame({'A': [0.01, 0.02, -0.01, 0.03], 'B': [0.01, 0.02, -0.01, 0.03]})
+        cov = optimizer._estimate_covariance(returns_df)
+        self.assertAlmostEqual(float(cov.loc['A', 'B']), 0.0, places=10)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -14,8 +14,6 @@ class TransactionCostAnalysis:
                 'avg_realized_slippage_bps': 0.0,
                 'implementation_shortfall': 0.0,
                 'implementation_shortfall_bps': 0.0,
-                'fill_rate': 0.0,
-                'avg_fill_size': 0.0,
                 'best_execution_score': 1.0,
                 'order_type_breakdown': {},
             }
@@ -33,10 +31,6 @@ class TransactionCostAnalysis:
         implementation_shortfall = total_cost + expected_vs_actual
         implementation_shortfall_bps = (implementation_shortfall / expected_notional * 10000.0) if expected_notional > 0 else 0.0
 
-        fills = [t.shares for t in trades if t.shares > 0]
-        fill_rate = min(sum(fills) / max(sum(fills), 1), 1.0)
-        avg_fill_size = sum(fills) / len(fills) if fills else 0.0
-
         # 1.0 is best, degrade score with execution drag (capped at 0)
         best_execution_score = max(0.0, 1.0 - implementation_shortfall_bps / 100.0)
 
@@ -50,8 +44,6 @@ class TransactionCostAnalysis:
             'avg_realized_slippage_bps': avg_realized_slippage_bps,
             'implementation_shortfall': implementation_shortfall,
             'implementation_shortfall_bps': implementation_shortfall_bps,
-            'fill_rate': fill_rate,
-            'avg_fill_size': avg_fill_size,
             'best_execution_score': best_execution_score,
             'order_type_breakdown': order_type_breakdown,
         }

@@ -1,6 +1,4 @@
 """Strategy registry and helpers.
-
-This module is the single source of truth for supported strategy names.
 """
 
 from importlib import import_module

@@ -167,8 +167,11 @@ class VolatilityTradingStrategy(BaseStrategy):
         if bool(self.get_config_param('use_hmm_regime', False)) and HMMRegimeDetector is not None:
             try:
                 self._hmm_detector = HMMRegimeDetector()
-            except Exception as exc:
-                self.logger.warning(f"Failed to initialize HMM detector, using hard-switch volatility regime: {exc}")
+            except (TypeError, ValueError, RuntimeError) as exc:
+                self.logger.warning(
+                    "Failed to initialize HMM detector, using hard-switch volatility regime: %s",
+                    exc,
+                )
 
     def get_required_history(self) -> int:
         return int(self.get_config_param('vol_window', 20)) + 5

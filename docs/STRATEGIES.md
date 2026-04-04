@@ -1,196 +1,208 @@
 # Strategy Reference
 
-This document covers the strategies currently registered in `strategies/__init__.py` and configurable in `config/strategies.yaml`.
+This document covers the strategies registered in `strategies/__init__.py` and configured via
+`config/strategies.yaml`.
 
-All strategies output long-only target weights. Final clipping/normalization behavior is handled by base strategy utilities and portfolio construction layers.
+All strategies output long-only target weights. Final clipping/normalization and portfolio-level
+risk controls are applied downstream by sizing/constraints/optimizer layers.
+
+---
+
+## Common strategy contract
+
+Each concrete strategy implements:
+
+- `generate_signals(date, data, current_positions) -> Dict[str, float]`
+- `get_required_history() -> int`
+
+`get_required_history()` is consumed by the backtest engine to compute warmup-aligned
+`effective_start_date`.
 
 ---
 
 ## 1) `momentum`
 
-**Implementation:** `MomentumStrategy` (`strategies/momentum.py`)
+**Class:** `MomentumStrategy` (`strategies/momentum.py`)
 
-### Inputs / features
-- Trailing total return over `lookback`
-- Optional skip window `skip_recent`
+**Purpose:** Cross-sectional momentum ranking.
 
-### Rules
-1. Rebalance only when `rebalance_frequency` days elapsed.
-2. Compute momentum per ticker.
-3. Keep tickers where `momentum >= min_momentum`.
-4. Rank descending and keep top `n_positions`.
-5. Weight by `weight_method` (`equal` or `proportional`).
+### Required config (with defaults)
+- `lookback` (default `126`)
+- `skip_recent` (default `21`)
+- `n_positions` (default `5`)
+- `rebalance_frequency` (default `21`)
+- `min_momentum` (default `0.0`)
+- `weight_method` (`equal` or `proportional`, default `equal`)
 
-### Config keys
-- `enabled`
-- `lookback`
-- `skip_recent`
-- `n_positions`
-- `rebalance_frequency`
-- `min_momentum`
-- `weight_method`
+### Warmup
+- `get_required_history() = lookback + skip_recent + 10`
+
+### Notes / limitations
+- Skips symbols without sufficient close history for the current date.
+- `proportional` weighting uses positive momentum magnitudes.
 
 ---
 
 ## 2) `dual_momentum`
 
-**Implementation:** `DualMomentumStrategy` (`strategies/momentum.py`)
+**Class:** `DualMomentumStrategy` (`strategies/momentum.py`)
 
-### Rules
-1. Rank candidates by trailing return (`lookback`) excluding `cash_ticker`.
-2. Apply absolute filter `>= absolute_momentum_threshold`.
-3. Keep top `n_positions` and equal-weight.
-4. If nothing passes, allocate to `cash_ticker` when available.
+**Purpose:** Relative + absolute momentum with cash fallback.
 
-### Config keys
-- `enabled`
-- `lookback`
-- `n_positions`
-- `absolute_momentum_threshold`
-- `cash_ticker`
+### Required config (with defaults)
+- `lookback` (default `252`)
+- `n_positions` (default `3`)
+- `absolute_momentum_threshold` (default `0.0`)
+- `cash_ticker` (default `SHY`)
+
+### Warmup
+- `get_required_history() = lookback + 10`
+
+### Notes / limitations
+- If no risky assets pass absolute momentum, allocates to `cash_ticker` when present in data.
 
 ---
 
 ## 3) `mean_reversion`
 
-**Implementation:** `MeanReversionStrategy` (`strategies/mean_reversion.py`)
+**Class:** `MeanReversionStrategy` (`strategies/mean_reversion.py`)
 
-### Inputs / features
-- Bollinger bands from `window` and `num_std`
-- Z-score vs rolling mean
+**Purpose:** Bollinger-band mean reversion.
 
-### Rules
-- Enter long when oversold (`price < lower_band`) up to `max_positions`.
-- Exit on mean reversion (`zscore >= exit_zscore`), upper-band touch, or `holding_period` expiry.
+### Required config (with defaults)
+- `window` (default `20`)
+- `num_std` (default `2`)
+- `holding_period` (default `5`)
+- `exit_zscore` (default `0`)
+- `max_positions` (default `5`)
 
-### Config keys
-- `enabled`
-- `window`
-- `num_std`
-- `holding_period`
-- `exit_zscore`
-- `max_positions`
+### Warmup
+- `get_required_history() = window + 10`
+
+### Notes / limitations
+- Entry is oversold-only (`price < lower_band`) and long-only.
 
 ---
 
 ## 4) `rsi_mean_reversion`
 
-**Implementation:** `RSIMeanReversionStrategy` (`strategies/mean_reversion.py`)
+**Class:** `RSIMeanReversionStrategy` (`strategies/mean_reversion.py`)
 
-### Inputs / features
-- RSI over `rsi_period`
+**Purpose:** RSI threshold mean reversion.
 
-### Rules
-- Entry: ticker RSI <= `oversold_threshold`.
-- Exit: ticker RSI >= `overbought_threshold`.
-- Position count constrained by `max_positions`.
-- Active names are equally weighted.
+### Required config (with defaults)
+- `rsi_period` (default `14`)
+- `oversold_threshold` (default `30`)
+- `overbought_threshold` (default `70`)
+- `max_positions` (default `5`)
 
-### Config keys
-- `enabled`
-- `rsi_period`
-- `oversold_threshold`
-- `overbought_threshold`
-- `max_positions`
+### Warmup
+- `get_required_history() = rsi_period + 10`
+
+### Notes / limitations
+- Long-only implementation; exits on overbought threshold.
 
 ---
 
 ## 5) `statistical_arbitrage`
 
-**Implementation:** `StatisticalArbitrageStrategy` (`strategies/alpha_expansion.py`)
+**Class:** `StatisticalArbitrageStrategy` (`strategies/alpha_expansion.py`)
 
-### Inputs / features
-- Cross-sectional mean-reversion score from `lookback` returns and `ranking_window`
+**Purpose:** Cross-sectional short-term reversal score.
 
-### Rules
-1. Score tickers.
-2. Rank descending.
-3. Keep top `n_positions`.
-4. Equal-weight selected names.
+### Required config (with defaults)
+- `lookback` (default `20`)
+- `ranking_window` (default `5`)
+- `n_positions` (default `3`)
 
-### Config keys
-- `enabled`
-- `lookback`
-- `ranking_window`
-- `n_positions`
+### Warmup
+- `get_required_history() = lookback + ranking_window`
+
+### Notes / limitations
+- Equal-weights selected symbols after ranking.
 
 ---
 
 ## 6) `factor_model`
 
-**Implementation:** `FactorModelStrategy` (`strategies/alpha_expansion.py`)
+**Class:** `FactorModelStrategy` (`strategies/alpha_expansion.py`)
 
-### Inputs / features
-- Price-derived proxies (`momentum`, `low_vol`, `quality_proxy`) over `lookback`
-- Weighted by `factor_weights`
+**Purpose:** Composite rank from price-derived factor proxies.
 
-### Rules
-1. Score each ticker.
-2. Keep top `n_positions`.
-3. Use positive scores for weighting; fallback to equal-weight if all non-positive.
+### Required config (with defaults)
+- `lookback` (default `126`)
+- `n_positions` (default `5`)
+- `factor_weights` mapping with keys:
+  - `momentum` (default `0.5`)
+  - `low_vol` (default `0.3`)
+  - `quality_proxy` (default `0.2`)
 
-### Config keys
-- `enabled`
-- `lookback`
-- `n_positions`
-- `factor_weights.momentum`
-- `factor_weights.low_vol`
-- `factor_weights.quality_proxy`
+### Warmup
+- `get_required_history() = lookback`
+
+### Notes / limitations
+- Uses positive-score normalization; falls back to equal-weight if selected raw scores are non-positive.
 
 ---
 
 ## 7) `volatility_trading`
 
-**Implementation:** `VolatilityTradingStrategy` (`strategies/alpha_expansion.py`)
+**Class:** `VolatilityTradingStrategy` (`strategies/alpha_expansion.py`)
 
-### Inputs / features
-- Realized annualized volatility of `benchmark_ticker` over `vol_window`
+**Purpose:** Risk-on / defensive basket allocation by realized volatility (optionally HMM).
 
-### Rules
-- Default mode: if realized vol > `vol_threshold`, equal-weight `defensive_tickers`; else equal-weight `risk_on_tickers`.
-- Optional HMM mode (`use_hmm_regime: true`): blend risk-on vs defensive baskets continuously from posterior probs.
+### Required config (with defaults)
+- `benchmark_ticker` (default `SPY`)
+- `vol_window` (default `20`)
+- `vol_threshold` (default `0.20`)
+- `risk_on_tickers` (default `[]`)
+- `defensive_tickers` (default `[]`)
+- `use_hmm_regime` (default `false`)
 
-### Config keys
-- `enabled`
-- `benchmark_ticker`
-- `vol_window`
-- `vol_threshold`
-- `risk_on_tickers`
-- `defensive_tickers`
-- `use_hmm_regime`
+### Warmup
+- `get_required_history() = vol_window + 5`
+
+### Notes / limitations
+- If HMM is enabled and available, blends baskets via regime probabilities.
+- If HMM inference is unavailable at runtime, falls back to threshold logic.
 
 ---
 
 ## 8) `strategy_orchestration`
 
-**Implementation:** `StrategyOrchestrationStrategy` (`strategies/strategy_orchestration.py`)
+**Class:** `StrategyOrchestrationStrategy` (`strategies/strategy_orchestration.py`)
 
-### Inputs / features
-- Enabled sub-strategies from strategies config (excluding itself)
-- Regime classification (`bull`/`neutral`/`bear`)
-- Per-substrategy trailing performance weighting
+**Purpose:** Ensemble of enabled sub-strategies with condition/regime-aware weighting.
 
-### Rules
-1. Generate sub-strategy target signals.
-2. Compute dynamic strategy weights from `base_weights`, recent performance, and `regime_multipliers`.
-3. Apply condition gating via `allowed_conditions`.
-4. Ensemble and normalize ticker-level output.
-5. Drop tiny weights under `min_weight_threshold`.
+### Required config (with defaults)
+- `base_weights` (default `{}`; auto-equal if omitted)
+- `allowed_conditions` (default `{}`)
+- `regime_multipliers` (default `{}`)
+- `benchmark_ticker` (default `SPY`)
+- `performance_lookback` (default `20`)
+- `min_weight_threshold` (default `0.0`)
+- `regime_vol_threshold` (default `0.25`)
+- `regime_bear_return_threshold` (default `0.0`)
+- `hmm_n_states` (default `3`)
+- `hmm_covariance_type` (default `full`)
+- `use_per_ticker_regime` (optional, default behavior is disabled unless explicitly enabled)
 
-### Config keys
-- `enabled`
-- `base_weights`
-- `allowed_conditions`
-- `regime_multipliers`
-- `benchmark_ticker`
-- `performance_lookback`
-- `min_weight_threshold`
-- `hmm_n_states`
-- `hmm_covariance_type`
+### Warmup
+- `get_required_history() = max(get_required_history() for each enabled sub-strategy)`
+- Returns `0` when no sub-strategies are enabled.
+
+### Notes / limitations
+- Only strategies with `enabled: true` in `strategies.yaml` are included.
+- Regime labels are constrained to `bull|neutral|bear`.
+- Emits attribution history consumed by engine-level attribution summaries.
+- Optional per-ticker regime gating/scaling is supported when provided by engine and enabled in config.
 
 ---
 
-## Data requirements
+## Data requirements and practical caveats
 
-- Most strategies require at minimum a `Close` column per ticker.
-- Tickers with insufficient lookback history are skipped for that date.
+- Strategies generally require a `Close` column in each ticker DataFrame.
+- Universe members without sufficient history are skipped for that date; engine-level diagnostics are
+  surfaced in `asset_exclusions`.
+- Output signals are long-only target weights; execution realism (costs, fills, constraints) is
+  handled by backtesting/live execution layers.

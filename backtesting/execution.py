@@ -25,24 +25,15 @@ class ExecutionEngine:
         self.config = config
         self.base_currency = base_currency
         
-        # IBKR Pro commission structure
-        self.commission_per_share = config.get('commission_per_share', 0.0035)
-        self.commission_min = config.get('commission_min', 0.35)
-        self.commission_max_pct = config.get('commission_max_pct', 0.01)
-        
-        # Non-US stocks
-        self.non_us_commission_rate = config.get('non_us_commission_rate', 0.001)
-        self.non_us_commission_min = config.get('non_us_commission_min', 4.0)
-
         # Composable fee components
         self.cost_components = config.get('components', {
             'broker': {
                 'enabled': True,
-                'us_commission_per_share': self.commission_per_share,
-                'us_commission_min': self.commission_min,
-                'us_commission_max_pct': self.commission_max_pct,
-                'non_us_commission_rate': self.non_us_commission_rate,
-                'non_us_commission_min': self.non_us_commission_min,
+                'us_commission_per_share': 0.0035,
+                'us_commission_min': 0.35,
+                'us_commission_max_pct': 0.01,
+                'non_us_commission_rate': 0.0005,
+                'non_us_commission_min': 4.0,
             },
             'regulatory': {
                 'enabled': True,
@@ -73,7 +64,7 @@ class ExecutionEngine:
         })
         self.slippage_model = config.get('slippage_model', {})
         self.slippage_mode = self.slippage_model.get('mode', 'heuristic')
-        logger.info(f"Slippage model mode: {self.slippage_mode}")
+        logger.info("Slippage model mode: %s", self.slippage_mode)
 
         # Simple spread simulation
         self.spread_bps = config.get('spread_bps', {
@@ -122,13 +113,13 @@ class ExecutionEngine:
             return 0.0
 
         if market_info.get('is_us', False):
-            comm = abs(shares) * broker_cfg.get('us_commission_per_share', self.commission_per_share)
-            comm = max(comm, broker_cfg.get('us_commission_min', self.commission_min))
-            comm = min(comm, trade_value * broker_cfg.get('us_commission_max_pct', self.commission_max_pct))
+            comm = abs(shares) * broker_cfg.get('us_commission_per_share', 0.0035)
+            comm = max(comm, broker_cfg.get('us_commission_min', 0.35))
+            comm = min(comm, trade_value * broker_cfg.get('us_commission_max_pct', 0.01))
             return comm
 
-        non_us_rate = broker_cfg.get('non_us_commission_rate', self.non_us_commission_rate)
-        non_us_min = broker_cfg.get('non_us_commission_min', self.non_us_commission_min)
+        non_us_rate = broker_cfg.get('non_us_commission_rate', 0.0005)
+        non_us_min = broker_cfg.get('non_us_commission_min', 4.0)
         return max(non_us_min, trade_value * non_us_rate)
 
     def _calculate_regulatory_fees(self, shares: float, trade_value: float, action: str, market_info: Dict) -> float:
@@ -525,7 +516,7 @@ class ExecutionEngine:
         # Execute each order
         for ticker, target_shares in target_positions.items():
             if ticker not in prices:
-                logger.warning(f"No price available for {ticker}, skipping")
+                logger.warning("No price available for %s, skipping", ticker)
                 continue
             
             current_shares = current_positions.get(ticker, 0)
