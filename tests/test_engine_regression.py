@@ -1,10 +1,12 @@
 import unittest
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
 from backtesting.engine import BacktestEngine
 from backtesting.metrics import PerformanceMetrics
+from backtesting.portfolio import Trade
 
 
 class AlwaysLongStrategy:
@@ -180,6 +182,56 @@ class BacktestEngineRegressionTests(unittest.TestCase):
                 'enabled': False,
             },
         }
+
+    def test_transaction_cost_sensitivity_converts_foreign_trade_costs_to_base_currency(self):
+        frame = pd.DataFrame(
+            {
+                'Open': [100.0, 101.0],
+                'High': [100.0, 101.0],
+                'Low': [100.0, 101.0],
+                'Close': [100.0, 110.0],
+                'Volume': [1_000_000, 1_000_000],
+            },
+            index=pd.to_datetime(['2024-01-02', '2024-01-03']),
+        )
+
+        engine = BacktestEngine(
+            strategy=AlwaysLongStrategy(),
+            data_manager=FakeDataManager(frame),
+            config=self._base_config(),
+        )
+        engine.fx_converter.convert_to_base = lambda value, from_currency, date=None: value * 2.0 if from_currency == 'GBP' else value
+        engine.portfolio.date_history = list(frame.index)
+        engine.portfolio.equity_history = [1000.0, 1100.0]
+        engine.portfolio.trades = [
+            Trade(
+                date=datetime(2024, 1, 2),
+                ticker='VOD.L',
+                action='BUY',
+                shares=100.0,
+                price=10.0,
+                commission=10.0,
+                slippage=5.0,
+                fx_cost=1.0,
+                value=1000.0,
+                currency='GBP',
+            )
+        ]
+
+        sensitivity = engine._run_transaction_cost_sensitivity(
+            tickers=['VOD.L'],
+            start_date='2024-01-01',
+            end_date='2024-01-31',
+        )
+
+        self.assertEqual(sensitivity['base']['base_currency'], 'USD')
+        self.assertAlmostEqual(sensitivity['base']['estimated_commission_cost_base'], 20.0, places=8)
+        self.assertAlmostEqual(sensitivity['base']['estimated_slippage_cost_base'], 10.0, places=8)
+        self.assertAlmostEqual(sensitivity['base']['estimated_fx_cost_base'], 1.0, places=8)
+        self.assertAlmostEqual(sensitivity['base']['estimated_total_cost_base'], 31.0, places=8)
+        self.assertAlmostEqual(sensitivity['base']['estimated_total_cost'], 31.0, places=8)
+        self.assertAlmostEqual(sensitivity['costs_x2_0']['estimated_total_cost_base'], 62.0, places=8)
+        self.assertAlmostEqual(sensitivity['base']['estimated_total_return_net'], 0.069, places=8)
 
     def test_backtest_uses_prior_bar_signal_and_current_open_execution(self):
         frame = pd.DataFrame(

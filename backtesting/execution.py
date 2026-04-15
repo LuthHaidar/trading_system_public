@@ -503,8 +503,6 @@ class ExecutionEngine:
         Returns:
             List of Trade objects
         """
-        if timing is None:
-            timing = execution_session
 
         trades = []
         

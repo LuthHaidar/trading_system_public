@@ -12,14 +12,14 @@ momentum:
   weight_method: proportional         # equal | proportional
 
 dual_momentum:
-  enabled: true
+  enabled: false
   lookback: 126                # Trailing window for momentum ranking
   n_positions: 3
   absolute_momentum_threshold: 0.0
   cash_ticker: SHY             # If no asset passes absolute momentum filter
 
 mean_reversion:
-  enabled: true
+  enabled: false
   window: 20                   # Bollinger window length
   num_std: 2                   # Band width in standard deviations
   holding_period: 5            # Max calendar days to hold a position
@@ -27,7 +27,7 @@ mean_reversion:
   max_positions: 5             # Cap on simultaneous holdings
 
 rsi_mean_reversion:
-  enabled: true
+  enabled: false
   rsi_period: 14                # RSI calculation period
   oversold_threshold: 30        # Enter when RSI <= this (oversold)
   overbought_threshold: 70      # Exit when RSI >= this (overbought)
@@ -49,7 +49,7 @@ factor_model:
     quality_proxy: 0.2
 
 volatility_trading:
-  enabled: true
+  enabled: false
   benchmark_ticker: SPY
   vol_window: 20
   vol_threshold: 0.20
@@ -66,11 +66,11 @@ strategy_orchestration:
   regime_bear_return_threshold: 0.0
   hmm_n_states: 3
   hmm_covariance_type: full
-  base_weights:
+  base_weights: # Initial weights for each strategy before regime adjustments. Should sum to 1 across all strategies.
     momentum: 0.4
     factor_model: 0.3
     statistical_arbitrage: 0.3
-  allowed_conditions:
+  allowed_conditions: # If weights do not sum to 1, they are re-normalized across allowed strategies for the current regime
     momentum: [bull, neutral]
     factor_model: [bull, neutral, bear]
     statistical_arbitrage: [neutral, bear]
