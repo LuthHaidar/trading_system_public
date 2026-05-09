@@ -56,6 +56,13 @@ def setup_logger(
     root_logger.setLevel(level)
 
     # Reset root handlers so repeated setup calls do not duplicate output.
+    existing_count = len(root_logger.handlers)
+    if existing_count > 0:
+        root_logger.warning(
+            "setup_logger reconfiguring root logger with %d existing handler(s); "
+            "discarding previous handler configuration",
+            existing_count,
+        )
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         handler.close()

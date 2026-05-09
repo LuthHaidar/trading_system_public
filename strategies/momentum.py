@@ -21,7 +21,12 @@ class MomentumStrategy(BaseStrategy):
     - lookback: Lookback period in days (default: 252 = 12 months)
     - skip_recent: Days to skip at end (default: 21 = 1 month)
     - n_positions: Number of positions to hold (default: 5)
-    - rebalance_frequency: Days between rebalances (default: 21)
+    - rebalance_frequency: Days between rebalances (default: 21).
+      Note: this operates alongside the engine's execution.rebalance_timeframe.
+      The engine only calls generate_signals on its scheduled rebalance dates,
+      and the strategy's own rebalance_frequency gates within those calls.
+      These two gates compound — e.g., weekly engine rebalances plus 21-day
+      strategy frequency means actual rebalances every 3 weeks.
     - min_momentum: Minimum momentum threshold (default: 0.0)
     - weight_method: 'equal' or 'proportional' (default: 'equal')
     - rebalance_threshold: Min weight change to trigger rebalance (default: 0.0)

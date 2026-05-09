@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 from threading import RLock
 import pandas as pd
 import numpy as np
@@ -28,7 +29,7 @@ class DataManager:
         """
         self.data_dir = data_dir
         self.cache_size = cache_size
-        self.cache = {}  # {ticker: DataFrame}
+        self.cache: OrderedDict[str, pd.DataFrame] = OrderedDict()
         self.use_adjusted_close = bool(use_adjusted_close)
         self.freshness_threshold_days = int(freshness_threshold_days)
         self.last_update = {}  # {ticker: datetime}
@@ -43,12 +44,16 @@ class DataManager:
         return os.path.join(self.data_dir, f"{clean_ticker}_daily_data.csv")
     
     def _manage_cache(self):
-        """Remove oldest cached item if cache is full (caller must hold cache lock)."""
-        if len(self.cache) >= self.cache_size and self.last_update:
-            oldest_ticker = min(self.last_update, key=self.last_update.get)
-            self.cache.pop(oldest_ticker, None)
-            self.last_update.pop(oldest_ticker, None)
-            logger.debug(f"Removed {oldest_ticker} from cache")
+        """Remove least-recently-used item if cache is full (caller must hold cache lock)."""
+        if len(self.cache) >= self.cache_size:
+            lru_ticker, _ = self.cache.popitem(last=False)
+            self.last_update.pop(lru_ticker, None)
+            logger.debug(f"Removed {lru_ticker} from cache (LRU)")
+
+    def _touch_cache(self, ticker: str) -> None:
+        """Move ticker to end of LRU order (caller must hold cache lock)."""
+        if ticker in self.cache:
+            self.cache.move_to_end(ticker)
 
     def _invalidate_cache(self, ticker: str) -> None:
         """Invalidate cache entry safely (idempotent, lock-protected)."""
@@ -137,6 +142,8 @@ class DataManager:
         # Check cache
         with self._cache_lock:
             cached_df = self.cache.get(ticker) if use_cache else None
+            if cached_df is not None:
+                self.cache.move_to_end(ticker)
         if cached_df is not None:
             df = cached_df
             logger.debug(f"Loaded {ticker} from cache")

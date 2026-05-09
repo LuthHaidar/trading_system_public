@@ -350,6 +350,19 @@ class PositionSizer:
         scale_factor = max(scale_factor, 0.0)
 
         scaled_weights = {ticker: float(weight * scale_factor) for ticker, weight in weights.items()}
+
+        # Enforce min_cash_reserve after scaling (scaling runs after constraints,
+        # so it may push total exposure above 1 - min_cash_reserve).
+        min_cash_reserve = float(self.config.get('min_cash_reserve', 0.0))
+        if min_cash_reserve > 0:
+            max_allowed_exposure = 1.0 - min_cash_reserve
+            gross_exposure = sum(scaled_weights.values())
+            if gross_exposure > max_allowed_exposure:
+                rescale = max_allowed_exposure / gross_exposure
+                scaled_weights = {
+                    ticker: float(w * rescale) for ticker, w in scaled_weights.items()
+                }
+
         self.logger.info(
             "Final target vol scaling: %.2fx (current: %.2f%%, target: %.2f%%)",
             scale_factor,

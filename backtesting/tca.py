@@ -22,9 +22,8 @@ class TransactionCostAnalysis:
         expected_notional = sum(abs((t.expected_price or t.price) * t.shares) for t in trades)
         gross_slippage = sum(t.slippage for t in trades)
         expected_vs_actual = sum(abs((t.price - (t.expected_price or t.price)) * t.shares) for t in trades)
-        expected_slippage_notional = max(notional - gross_slippage, 0.0)
 
-        avg_expected_slippage_bps = (gross_slippage / expected_slippage_notional * 10000.0) if expected_slippage_notional > 0 else 0.0
+        avg_expected_slippage_bps = (gross_slippage / notional * 10000.0) if notional > 0 else 0.0
         avg_realized_slippage_bps = (expected_vs_actual / expected_notional * 10000.0) if expected_notional > 0 else 0.0
 
         total_cost = sum(t.total_cost() for t in trades)

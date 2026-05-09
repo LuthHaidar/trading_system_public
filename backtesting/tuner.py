@@ -50,20 +50,14 @@ def _expand_range_token(token: str) -> List[Any]:
             f"Range step sign does not move from start to end in token '{token}'"
         )
 
-    values: List[Any] = []
-    current = float(start)
+    start_f = float(start)
     end_f = float(end)
     step_f = float(step)
 
-    epsilon = 1e-12
-    if direction > 0:
-        while current <= end_f + epsilon:
-            values.append(round(current, 12))
-            current += step_f
-    else:
-        while current >= end_f - epsilon:
-            values.append(round(current, 12))
-            current += step_f
+    num_steps = int(round((end_f - start_f) / step_f))
+    values: List[Any] = [
+        round(start_f + i * step_f, 12) for i in range(num_steps + 1)
+    ]
 
     cast_to_int = all(isinstance(v, int) for v in (start, end, step))
     if cast_to_int:

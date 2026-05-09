@@ -108,12 +108,17 @@ class PerformanceMetrics:
     @staticmethod
     def calculate_sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.02) -> float:
         """
-        Calculate Sortino ratio (uses downside deviation)
-        
+        Calculate Sortino ratio (uses downside deviation).
+
+        Uses the full-sample downside deviation: sqrt(mean(min(excess, 0)^2)),
+        which divides by sqrt(n) for ALL observations (not only negative ones).
+        This differs from the Sortino (1994) definition that uses only negative
+        observations in the denominator, and produces systematically higher ratios.
+
         Args:
             returns: Series of daily returns
             risk_free_rate: Annual risk-free rate
-            
+
         Returns:
             Sortino ratio
         """
@@ -169,6 +174,9 @@ class PerformanceMetrics:
         """
         if max_drawdown == 0:
             return 0.0
+        
+        if pd.isna(cagr) or pd.isna(max_drawdown): # Handle NaN inputs gracefully
+            return float('nan')
         
         return cagr / abs(max_drawdown)
     
@@ -458,7 +466,7 @@ class PerformanceMetrics:
             losses = [p for p in pnls if p < 0]
             avg_win = float(np.mean(wins)) if wins else 0.0
             avg_loss = float(np.mean(losses)) if losses else 0.0
-            reward_to_risk = (avg_win / abs(avg_loss)) if avg_loss < 0 else (float('inf') if avg_win > 0 else 0.0)
+            reward_to_risk = (avg_win / abs(avg_loss)) if avg_loss < 0 else (None if avg_win > 0 else 0.0)
 
             holding_days = [(t.exit_date - t.entry_date).days for t in matched_trades]
             avg_holding_period = float(np.mean(holding_days)) if holding_days else 0.0
@@ -582,6 +590,9 @@ class PerformanceMetrics:
                 gross_exposure_ratio = (
                     gross_abs_safe / safe_equity
                 ).replace([np.inf, -np.inf], np.nan)
+                # Exclude dates with very low gross exposure (<1% of equity) from the
+                # HHI average to avoid diluting concentration by cash-heavy days
+                # where the portfolio is nearly flat.
                 valid_exposure_mask = gross_exposure_ratio >= 0.01
                 weights = ticker_exposure_df.div(gross_abs_safe, axis=0).fillna(0.0)
                 hhi_series = (weights ** 2).sum(axis=1)

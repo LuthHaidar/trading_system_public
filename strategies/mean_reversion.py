@@ -44,6 +44,14 @@ class MeanReversionStrategy(BaseStrategy):
                         current_positions: WeightMap) -> WeightMap:
         """Generate mean reversion signals"""
         self._last_signal_meta = {}
+
+        # Prune entry_dates for positions no longer held (e.g. closed externally
+        # or engine restart with fresh state).
+        held_tickers = {t for t, w in (current_positions or {}).items() if w > 0}
+        stale = [t for t in self.entry_dates if t not in held_tickers]
+        for ticker in stale:
+            del self.entry_dates[ticker]
+
         new_positions = {}
         signal_meta = {}
         

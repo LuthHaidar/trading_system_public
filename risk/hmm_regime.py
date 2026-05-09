@@ -125,7 +125,13 @@ class HMMRegimeDetector:
             for j in range(i + 1, len(ordered_returns)):
                 sep_vals.append(abs(ordered_returns[i] - ordered_returns[j]))
         max_sep = max(sep_vals) if sep_vals else 0.0
-        pooled_std = float(state_return_means.std()) if float(state_return_means.std()) > 0 else 0.0
+
+        within_state_vars = []
+        for state_id in states_present:
+            state_raw = labeled[labeled['state'] == state_id]['raw_return']
+            if len(state_raw) > 1:
+                within_state_vars.append(float(state_raw.var()))
+        pooled_std = float(np.sqrt(np.mean(within_state_vars))) if within_state_vars else 0.0
         threshold = float(self.min_state_mean_separation * pooled_std)
         if len(states_present) > 1 and max_sep < threshold:
             logger.warning(

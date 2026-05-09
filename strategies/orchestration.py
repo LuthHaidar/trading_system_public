@@ -12,6 +12,7 @@ class MultiStrategyOrchestrator:
         trailing_performance: Dict[str, float],
         regime: str,
         regime_multipliers: Dict[str, Dict[str, float]],
+        min_weight_floor: float = 0.1,
     ) -> Dict[str, float]:
         adjusted = {}
         regime_adjust = regime_multipliers.get(regime, {})
@@ -26,7 +27,17 @@ class MultiStrategyOrchestrator:
         if total <= 0:
             equal = 1.0 / max(len(base_weights), 1)
             return {k: equal for k in base_weights}
-        return {k: v / total for k, v in adjusted.items()}
+
+        normalized = {k: v / total for k, v in adjusted.items()}
+        n = len(base_weights)
+        safe_floor = min(min_weight_floor, 1.0 / max(n, 1))
+        floor_weight = 1.0 / max(n, 1) * safe_floor
+
+        floored = {
+            k: max(v, floor_weight) for k, v in normalized.items()
+        }
+        retotal = sum(floored.values())
+        return {k: v / retotal for k, v in floored.items()}
 
     @staticmethod
     def condition_switches(

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from backtesting.engine import BacktestEngine
-from backtesting.portfolio import DataStalenessError, Portfolio
+from backtesting.portfolio import DataStalenessError, Portfolio, Trade
 try:
     from broker.ibkr_client import IBKRClient
 except ModuleNotFoundError:
@@ -112,6 +112,52 @@ class ImmediateBugRegressionTests(unittest.TestCase):
         )
         with self.assertRaises(DataStalenessError):
             portfolio.get_total_equity({}, {'AAA': 'USD'}, date=tuesday)
+
+    def test_sell_tolerance_closes_position_without_negative_dust(self):
+        portfolio = Portfolio(initial_capital=0.0, base_currency='USD', max_stale_price_days=1)
+        portfolio.positions = {'AAA': 0.9999999999999999}
+        portfolio.position_currencies = {'AAA': 'USD'}
+
+        trade = Trade(
+            date=pd.Timestamp('2024-01-02').to_pydatetime(),
+            ticker='AAA',
+            action='SELL',
+            shares=1.001,
+            price=100.0,
+            commission=0.0,
+            slippage=0.0,
+            fx_cost=0.0,
+            value=100.1,
+            currency='USD',
+        )
+
+        self.assertTrue(portfolio.execute_trade(trade))
+        self.assertNotIn('AAA', portfolio.positions)
+        self.assertNotIn('AAA', portfolio.position_currencies)
+        self.assertEqual(len(portfolio.trades), 1)
+
+    def test_sell_beyond_tolerance_is_rejected(self):
+        portfolio = Portfolio(initial_capital=0.0, base_currency='USD', max_stale_price_days=1)
+        portfolio.positions = {'AAA': 1.0}
+        portfolio.position_currencies = {'AAA': 'USD'}
+
+        trade = Trade(
+            date=pd.Timestamp('2024-01-02').to_pydatetime(),
+            ticker='AAA',
+            action='SELL',
+            shares=1.002,
+            price=100.0,
+            commission=0.0,
+            slippage=0.0,
+            fx_cost=0.0,
+            value=100.2,
+            currency='USD',
+        )
+
+        self.assertFalse(portfolio.execute_trade(trade))
+        self.assertEqual(portfolio.positions['AAA'], 1.0)
+        self.assertEqual(portfolio.position_currencies['AAA'], 'USD')
+        self.assertEqual(len(portfolio.trades), 0)
 
     def test_b4_initial_positions_are_applied_on_first_bar(self):
         idx = pd.bdate_range('2024-01-01', periods=10)

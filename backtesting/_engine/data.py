@@ -74,13 +74,12 @@ class BacktestDataMixin:
         Missing ticker prices on a union date are handled by the portfolio's stale-price
         carry-forward logic (subject to max_stale_price_days).
         """
-        date_union = pd.DatetimeIndex([])
+        date_union = pd.DatetimeIndex([]) # Start with empty index and iteratively union to preserve all dates across tickers
         for _, df in data.items():
             ticker_dates = df.loc[start_date:end_date].index
+            # Union with the existing date_union to accumulate all unique trading dates across tickers
             date_union = date_union.union(ticker_dates)
 
-        if len(date_union) == 0:
-            return pd.DatetimeIndex([])
         return date_union.sort_values()
 
     def _compute_effective_start_date(self,

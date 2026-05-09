@@ -29,10 +29,17 @@ class StrategyOrchestrationStrategy(BaseStrategy):
         self.benchmark_ticker = self.get_config_param('benchmark_ticker', 'SPY')
         self.performance_lookback = int(self.get_config_param('performance_lookback', 20))
         self.min_weight_threshold = float(self.get_config_param('min_weight_threshold', 0.0))
+        self.min_strategy_weight_floor = float(
+            self.get_config_param('min_strategy_weight_floor', 0.1)
+        )
+        self.max_attribution_records = int(
+            self.get_config_param('max_attribution_records', 500)
+        )
         self.regime_vol_threshold = float(self.get_config_param('regime_vol_threshold', 0.25))
         self.regime_bear_return_threshold = float(
             self.get_config_param('regime_bear_return_threshold', 0.0)
         )
+        self.regime_bull_return_threshold = self.get_config_param('regime_bull_return_threshold', None)
         self.hmm_n_states = int(self.get_config_param('hmm_n_states', 3))
         self.hmm_covariance_type = str(self.get_config_param('hmm_covariance_type', 'full'))
         self.regime_detector = None
@@ -109,12 +116,14 @@ class StrategyOrchestrationStrategy(BaseStrategy):
                     returns,
                     vol_threshold=self.regime_vol_threshold,
                     bear_return_threshold=self.regime_bear_return_threshold,
+                    bull_return_threshold=self.regime_bull_return_threshold,
                 ).get('regime', 'unknown')
         else:
             regime = AdvancedRiskAnalytics.regime_based_scaler(
                 returns,
                 vol_threshold=self.regime_vol_threshold,
                 bear_return_threshold=self.regime_bear_return_threshold,
+                bull_return_threshold=self.regime_bull_return_threshold,
             ).get('regime', 'unknown')
 
         assert regime in {'bull', 'neutral', 'bear'}, f"Unrecognized regime label: {regime!r}"
@@ -190,6 +199,7 @@ class StrategyOrchestrationStrategy(BaseStrategy):
             trailing_performance=trailing_perf,
             regime=regime,
             regime_multipliers=self.regime_multipliers,
+            min_weight_floor=self.min_strategy_weight_floor,
         )
 
         switches = MultiStrategyOrchestrator.condition_switches(
@@ -264,6 +274,10 @@ class StrategyOrchestrationStrategy(BaseStrategy):
                 'strategy_allocations': allocations_by_strategy,
             }
         )
+        # Cap to prevent unbounded memory growth on long backtests.
+        if len(self._attribution_history) > self.max_attribution_records:
+            excess = len(self._attribution_history) - self.max_attribution_records
+            self._attribution_history = self._attribution_history[excess:]
         self.last_strategy_weights = dict(strategy_weights)
         return self.validate_signals(combined)
 

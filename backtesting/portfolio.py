@@ -8,6 +8,9 @@ from utils.currency import CurrencyConverter
 
 logger = get_logger(__name__)
 
+SHARE_TOLERANCE = 1e-3 # Tolerance for share quantity comparisons to account for fractional shares and floating point issues
+FLOAT_COMPARISON_EPSILON = 1e-12 # Small epsilon to prevent floating point precision issues in comparisons
+
 
 @dataclass
 class Trade:
@@ -155,24 +158,24 @@ class Portfolio:
         """Resolve valuation price using spot or stale fallback rules."""
         valuation_session = self._get_valuation_session(valuation_date)
         effective_price = prices.get(ticker)
-        if effective_price is not None:
+        if effective_price is not None: # Update last known price and session
             self._last_prices[ticker] = float(effective_price)
-            if valuation_date is not None:
+            if valuation_date is not None: # Store the date of the last price update for staleness checks
                 self._last_price_dates[ticker] = valuation_date
-            if valuation_session is not None:
-                self._last_price_sessions[ticker] = valuation_session
+                self._last_price_sessions[ticker] = valuation_session # type: ignore
             return float(effective_price)
 
         last_price = self._last_prices.get(ticker)
         last_price_date = self._last_price_dates.get(ticker)
         last_price_session = self._last_price_sessions.get(ticker)
         if last_price is None or valuation_date is None or last_price_date is None or valuation_session is None or last_price_session is None:
+            # No price available and/or cannot determine staleness without valuation session
             msg = f"Missing valuation price for held ticker {ticker} and no historical fallback available"
             logger.error(msg)
             raise DataStalenessError(msg)
 
         stale_sessions = int(valuation_session - last_price_session)
-        if stale_sessions > self.max_stale_price_days:
+        if stale_sessions > self.max_stale_price_days: # Exceeds staleness threshold, raise error to halt backtest
             msg = (
                 f"Stale valuation price for {ticker}: last seen {last_price_date.date()} "
                 f"({stale_sessions} stale valuation session(s), max={self.max_stale_price_days})"
@@ -180,6 +183,7 @@ class Portfolio:
             logger.error(msg)
             raise DataStalenessError(msg)
 
+        # Log warning about using stale price but allow backtest to continue with last known price
         logger.warning(
             "Using stale fallback price for %s (%d stale valuation session(s)); last date=%s",
             ticker,
@@ -207,11 +211,12 @@ class Portfolio:
         valuation_date = pd.Timestamp(date).tz_localize(None).normalize() if date is not None else None
 
         for ticker in list(self.positions.keys()):
-            effective_price = self._resolve_effective_price(ticker, prices, valuation_date)
+            effective_price = self._resolve_effective_price(ticker, prices, valuation_date) # get price with staleness handling
             if effective_price is None:
-                continue
+                continue # Skip if no price available even after staleness handling (e.g. zero shares or missing price with no fallback)
 
             currency = currencies.get(ticker) if currencies else None
+            # Calculate position value with proper FX conversion
             position_value += self.get_position_value(ticker, float(effective_price), currency, date=date)
 
         return self.cash + position_value
@@ -240,7 +245,7 @@ class Portfolio:
         
         if trade.action == 'BUY':
             # Check sufficient cash
-            total_cost = trade_value_base + cost_base + trade.fx_cost
+            total_cost = trade_value_base + cost_base + trade.fx_cost # fx_cost is already in base currency
             if total_cost > self.cash:
                 logger.warning(
                     "Insufficient cash for %s: need %.2f, have %.2f",
@@ -250,7 +255,7 @@ class Portfolio:
                 )
                 return False
             
-            # Update cash
+            # Update cash (in base currency)
             self.cash -= total_cost
             
             # Update positions
@@ -269,8 +274,9 @@ class Portfolio:
             
         else:  # SELL
             # Check sufficient shares
-            current_shares = self.positions.get(trade.ticker, 0)
-            if trade.shares > current_shares + 0.001:  # Allow small floating point error
+            current_shares = float(self.positions.get(trade.ticker, 0.0))
+            sell_tolerance = SHARE_TOLERANCE + FLOAT_COMPARISON_EPSILON # 
+            if trade.shares > current_shares + sell_tolerance: # Allow small tolerance for floating point issues, but reject if it exceeds that
                 logger.warning(
                     "Insufficient shares for %s: need %s, have %s",
                     trade.ticker,
@@ -278,17 +284,25 @@ class Portfolio:
                     current_shares,
                 )
                 return False
-            
+            new_shares = current_shares - trade.shares
+            if new_shares < -sell_tolerance: # Allow small negative tolerance for floating point issues, but reject if it exceeds that
+                logger.error(
+                    "Rejecting SELL for %s: current_shares=%s trade_shares=%s would leave remaining=%s",
+                    trade.ticker,
+                    current_shares,
+                    trade.shares,
+                    new_shares,
+                )
+                return False
+
             # Update cash
             net_proceeds = trade_value_base - cost_base - trade.fx_cost
             self.cash += net_proceeds
-            
+
             # Update positions
-            new_shares = current_shares - trade.shares
-            if abs(new_shares) < 0.001:  # Close to zero
-                del self.positions[trade.ticker]
-                if trade.ticker in self.position_currencies:
-                    del self.position_currencies[trade.ticker]
+            if abs(new_shares) <= sell_tolerance: # If shares are effectively zero within tolerance, remove position
+                self.positions.pop(trade.ticker, None)
+                self.position_currencies.pop(trade.ticker, None)
             else:
                 self.positions[trade.ticker] = new_shares
             

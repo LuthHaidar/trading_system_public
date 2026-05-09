@@ -33,9 +33,21 @@ class AdvancedRiskAnalytics:
                             bull_scale: float = 1.0,
                             bear_scale: float = 0.5,
                             high_vol_scale: float = 0.7,
+                            neutral_scale: float = 1.0,
                             vol_threshold: float = 0.25,
-                            bear_return_threshold: float = 0.0) -> Dict[str, str | float]:
-        """Fallback heuristic regime scaler; returns one of {'bull','neutral','bear'}."""
+                            bear_return_threshold: float = 0.0,
+                            bull_return_threshold: float | None = None) -> Dict[str, str | float]:
+        """Fallback heuristic regime scaler; returns one of {'bull','neutral','bear'}.
+
+        Regime logic:
+        - vol > vol_threshold → bear (high-vol regime)
+        - trend < bear_return_threshold → bear (negative trend)
+        - bull_return_threshold is set and trend >= bull_return_threshold → bull
+        - otherwise → neutral
+
+        If bull_return_threshold is None (default), the non-bear, non-high-vol
+        regime returns 'bull', preserving backward-compatible behavior.
+        """
         if len(market_returns) < 20:
             return {'regime': 'neutral', 'scale': 1.0}
         trend = market_returns.tail(60).mean()
@@ -44,6 +56,10 @@ class AdvancedRiskAnalytics:
             return {'regime': 'bear', 'scale': high_vol_scale}
         if trend < bear_return_threshold:
             return {'regime': 'bear', 'scale': bear_scale}
+        if bull_return_threshold is not None and trend >= bull_return_threshold:
+            return {'regime': 'bull', 'scale': bull_scale}
+        if bull_return_threshold is not None:
+            return {'regime': 'neutral', 'scale': neutral_scale}
         return {'regime': 'bull', 'scale': bull_scale}
 
     @staticmethod

@@ -113,5 +113,5 @@ class FIFOTradeMatcher:
             'realized_pnl': sum(pnls),
             'closed_round_trips': len(matched_trades),
             'win_rate': sum(1 for v in pnls if v > 0) / len(pnls),
-            'profit_factor': (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 1.0),
+            'profit_factor': (gross_profit / gross_loss) if gross_loss > 0 else (None if gross_profit > 0 else 1.0),
         }

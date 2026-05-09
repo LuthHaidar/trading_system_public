@@ -321,14 +321,14 @@ class ExecutionEngine:
             currency = self.fx_converter.get_ticker_currency(ticker)
 
         commission = self.calculate_commission(shares, execution_price, ticker, action=action)
-        model_slippage = self.calculate_slippage(
+        # Execution price already includes the bid/ask spread crossing cost.
+        # Keep slippage as the modeled impact component only to avoid charging spread twice.
+        slippage = self.calculate_slippage(
             shares,
             execution_price,
             avg_volume,
             ticker,
         )
-        spread_cost = shares * abs(execution_price - reference_price)
-        slippage = model_slippage + spread_cost
         trade_value = shares * execution_price
         fx_cost = self.calculate_fx_cost(trade_value, currency, date=date)
 
@@ -390,7 +390,6 @@ class ExecutionEngine:
                      avg_volume: float, date: datetime,
                      currency: str = None,
                      order_type: str = 'MARKET',
-                     timing: str = None,
                      run_id: Optional[str] = None,
                      signal_date: Optional[datetime] = None,
                      decision: Optional[str] = None,
@@ -434,7 +433,10 @@ class ExecutionEngine:
             logger.warning("Order type '%s' is not supported for retail mode; using MARKET", order_type)
 
         filled_shares = abs(shares_to_trade)
-
+        
+        # For a buy order, we assume we pay the ask price which is the mid price plus half the spread. 
+        # For a sell order, we assume we receive the bid price which is the mid price minus half the spread.
+        # This way, the execution price reflects the cost of crossing the spread.
         spread_bps = self._infer_spread_bps(ticker)
         half_spread = price * (spread_bps / 10000.0) / 2.0
         execution_price = price + half_spread if action == 'BUY' else max(price - half_spread, 0.0)
@@ -505,14 +507,15 @@ class ExecutionEngine:
         """
 
         trades = []
+        rebalance_targets = dict(target_positions)
         
         # Close positions not in targets
         for ticker in current_positions:
-            if ticker not in target_positions:
-                target_positions[ticker] = 0
+            if ticker not in rebalance_targets:
+                rebalance_targets[ticker] = 0
         
         # Execute each order
-        for ticker, target_shares in target_positions.items():
+        for ticker, target_shares in rebalance_targets.items():
             if ticker not in prices:
                 logger.warning("No price available for %s, skipping", ticker)
                 continue
@@ -562,7 +565,6 @@ class ExecutionEngine:
                 avg_volume=volumes.get(ticker, 0),
                 date=date,
                 currency=currencies.get(ticker),
-                timing=timing,
                 run_id=run_id,
                 signal_date=signal_date,
                 decision=self.infer_decision_label(current_shares, target_shares),

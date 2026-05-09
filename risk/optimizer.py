@@ -230,7 +230,18 @@ class PortfolioOptimizer:
         # Align all assets to common timestamps and remove missing values. This
         # prevents downstream covariance estimators (e.g., LedoitWolf) from
         # receiving NaNs when one ticker has gaps relative to others.
+        before_drop = len(returns_df)
         returns_df = returns_df.dropna(how='any')
+        after_drop = len(returns_df)
+        if before_drop > 0 and (before_drop - after_drop) / before_drop > 0.2:
+            self.logger.warning(
+                "dropna removed %d of %d observations (%.0f%%) from the covariance window "
+                "due to staggered histories; the effective estimation window is only %d days",
+                before_drop - after_drop,
+                before_drop,
+                ((before_drop - after_drop) / before_drop) * 100,
+                after_drop,
+            )
 
         if len(returns_df) < 2:
             return None, []

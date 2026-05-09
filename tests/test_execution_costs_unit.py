@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from unittest.mock import Mock
 
 from backtesting.execution import ExecutionEngine
 
@@ -106,7 +107,6 @@ class ExecutionCostsUnitTests(unittest.TestCase):
 
         commission = engine.calculate_commission(shares, execution_price, ticker, action=action)
         model_slippage = engine.calculate_slippage(shares, execution_price, avg_volume, ticker)
-        spread_cost = shares * abs(execution_price - reference_price)
         fx_cost = engine.calculate_fx_cost(shares * execution_price, 'GBP', date=datetime(2024, 1, 2))
 
         trade = engine._build_trade(
@@ -122,9 +122,73 @@ class ExecutionCostsUnitTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(trade.commission, commission, places=8)
-        self.assertAlmostEqual(trade.slippage, model_slippage + spread_cost, places=8)
+        self.assertAlmostEqual(trade.slippage, model_slippage, places=8)
         self.assertAlmostEqual(trade.fx_cost, fx_cost, places=8)
-        self.assertAlmostEqual(trade.total_cost(), commission + model_slippage + spread_cost + fx_cost, places=8)
+        self.assertAlmostEqual(trade.total_cost(), commission + model_slippage + fx_cost, places=8)
+
+    def test_parameterized_mode_does_not_add_explicit_spread_cost(self):
+        config = self._base_config()
+        config['slippage_model'] = {
+            'mode': 'parameterized',
+            'default_bucket': 'medium_liquidity',
+            'spread_weight': 0.5,
+            'volatility_weight': 0.0,
+            'participation_weight': 0.0,
+            'bucket_base_bps': {'medium_liquidity': 0.0},
+            'bucket_spread_proxy_bps': {'medium_liquidity': 3.0},
+            'bucket_overrides': {'SPY': 'medium_liquidity'},
+        }
+
+        engine = ExecutionEngine(config, base_currency='USD')
+        trade = engine.execute_order(
+            ticker='SPY',
+            target_shares=100,
+            current_shares=0,
+            price=100.0,
+            avg_volume=1_000_000,
+            date=datetime(2024, 1, 2),
+            currency='USD',
+        )
+
+        self.assertIsNotNone(trade)
+        expected_model_slippage = engine.calculate_slippage(
+            shares=100,
+            price=trade.price,
+            avg_volume=1_000_000,
+            ticker='SPY',
+        )
+        realized_spread_cost = trade.shares * abs(trade.price - 100.0)
+
+        self.assertAlmostEqual(trade.slippage, expected_model_slippage, places=8)
+        self.assertNotAlmostEqual(
+            trade.slippage,
+            expected_model_slippage + realized_spread_cost,
+            places=8,
+        )
+
+    def test_execute_rebalance_does_not_mutate_target_positions_when_closing_missing_holdings(self):
+        engine = ExecutionEngine(self._base_config(), base_currency='USD')
+        target_positions = {'SPY': 10}
+        current_positions = {'SPY': 5, 'QQQ': 7}
+        recorded_targets = []
+
+        engine.execute_order = Mock(
+            side_effect=lambda **kwargs: recorded_targets.append(
+                (kwargs['ticker'], kwargs['target_shares'], kwargs['current_shares'])
+            ) or None
+        )
+
+        engine.execute_rebalance(
+            target_positions=target_positions,
+            current_positions=current_positions,
+            prices={'SPY': 100.0, 'QQQ': 200.0},
+            volumes={'SPY': 1_000_000, 'QQQ': 1_000_000},
+            currencies={'SPY': 'USD', 'QQQ': 'USD'},
+            date=datetime(2024, 1, 2),
+        )
+
+        self.assertEqual(target_positions, {'SPY': 10})
+        self.assertIn(('QQQ', 0, 7), recorded_targets)
 
 
 if __name__ == '__main__':

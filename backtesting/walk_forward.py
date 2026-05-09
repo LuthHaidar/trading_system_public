@@ -9,6 +9,7 @@ import pandas as pd
 from backtesting.validation import ValidationSuite, WindowSplit
 from backtesting.engine import run_backtest_from_config
 from backtesting.tuner import build_strategy_overrides, rank_results
+from utils.logger import get_logger
 
 
 
@@ -87,6 +88,18 @@ def run_walk_forward(
 
     use_sweep = bool(sweep_definitions)
     candidate_overrides = build_strategy_overrides(sweep_definitions or []) if use_sweep else [{}]
+
+    if use_sweep and len(candidate_overrides) > 0:
+        train_count = len(splits) * len(candidate_overrides)
+        total_count = train_count + len(splits)  # + OOS per fold
+        get_logger(__name__).info(
+            "Walk-forward sweep: %d folds x %d candidates = %d train + %d OOS = %d backtests",
+            len(splits),
+            len(candidate_overrides),
+            train_count,
+            len(splits),
+            total_count,
+        )
 
     for split in splits:
         selected_override = dict(strategy_override or {})
